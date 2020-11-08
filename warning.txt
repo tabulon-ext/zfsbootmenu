@@ -1,0 +1,22 @@
+Unable to parse configuration etc/zfsbootmenu/config.yaml as YAML.
+
+If this is a legacy configuration, migrate to the new format by running
+
+  bin/generate-zbm --migrate etc/zfsbootmenu/config.yaml [ --config <output> ],
+
+where `<output>` is the desired location of the converted file. If you
+omit the `--config` option, an output location
+
+  /etc/zfsbootmenu/config.yaml
+
+will be used by default.
+
+----
+
+Line      : 3
+Column    : 17
+Expected  : EOL
+Got       : COLON
+Where     : /usr/share/perl5/vendor_perl/YAML/PP/Parser.pm line 386
+YAML      : ": /boot/efi\n"
+  at /usr/share/perl5/vendor_perl/YAML/PP/Loader.pm line 94.
