@@ -19,6 +19,21 @@ if ! is_lib_sourced > /dev/null 2>&1 ; then
   exec /bin/bash
 fi
 
+if [ -n "${zbm_scale_term}" ]; then
+  zdebug "automatically setting console font size"
+  target_lines=40
+
+  for terminus in ter-132n ter-124n ter-116n ter-112n ; do
+    setfont "${terminus}"
+    if [ "$( tput lines )" -lt "${target_lines}" ] ; then
+      continue
+    else
+      zdebug "set font to ${terminus}"
+      break
+    fi
+  done
+fi
+
 mkdir -p "${BASE}"
 
 # Attempt to load spl normally

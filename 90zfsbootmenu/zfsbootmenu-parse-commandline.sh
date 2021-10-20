@@ -179,6 +179,12 @@ if [ -n "${prefer}" ]; then
   root="zfsbootmenu:POOL=${prefer}"
 fi
 
+# shellcheck disable=SC2034
+if getargbool 1 zbm.scale ; then
+  zbm_scale_term=1
+  info "ZFSBootMenu: enabling automatic font scaling"
+fi
+
 wait_for_zfs=0
 case "${root}" in
   ""|zfsbootmenu|zfsbootmenu:)

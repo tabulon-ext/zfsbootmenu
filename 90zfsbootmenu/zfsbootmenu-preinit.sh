@@ -14,6 +14,9 @@ tty_re='/dev/tty[0-9]'
 if ! [[ ${control_term} =~ ${tty_re} ]]; then
   stty rows "${zbm_lines:-25}"
   stty cols "${zbm_columns:-80}"
+
+  # disable automatic terminal scaling on a serial console
+  zbm_scale_term=
 fi
 
 export BASE="/zfsbootmenu"
@@ -34,6 +37,7 @@ export default_hostid=00bab10c
 export zbm_sort="${zbm_sort}"
 export zbm_set_hostid="${zbm_set_hostid}"
 export zbm_import_delay="${zbm_import_delay}"
+export zbm_scale_term="${zbm_scale_term}"
 export control_term="${control_term}"
 # END additions by zfsbootmenu-preinit.sh
 EOF
