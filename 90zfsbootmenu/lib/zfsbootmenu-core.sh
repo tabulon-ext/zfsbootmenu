@@ -1301,6 +1301,12 @@ has_resume_device() {
   return 1
 }
 
+stripcolors() {
+  shopt -s extglob
+  line="${1//+(\\033\[[0-1];3[0-7]m|\\033\[0m)/}"
+  echo -n "${line}" | sed "s,\x1B\[[0-9;]*[a-zA-Z],,g"
+}
+
 # arg1..argN: lines of warning message
 # prints: warning message
 # returns: 1 if user pressed ESC, 0 otherwise
@@ -1336,7 +1342,10 @@ timed_prompt() {
   [ -n "${cnum}" ] && tput setaf "${cnum}"
   while [ $# -gt 0 ]; do
     local line=${1}
-    y=$(( (WIDTH - ${#line}) / 2 ))
+    zdebug "raw: ${#1} $1"
+    short="$( stripcolors "${line}" )"
+    zdebug "stripped: ${#short} ${short}"
+    y=$(( (WIDTH - ${#short}) / 2 ))
     [ "${y}" -lt 0 ] && y=0
     tput cup $x $y
     echo -n -e "${line}"
@@ -1348,7 +1357,11 @@ timed_prompt() {
   for (( i=delay; i>0; i-- )); do
     # shellcheck disable=SC2059
     mes="$( printf "${prompt}" "${i}" )"
-    y=$(( (WIDTH - ${#mes}) / 2 ))
+    zdebug "Inside the delay loop"
+    zdebug "raw: ${mes}"
+    short="$( stripcolors "${mes}" )"
+    zdebug "stripped: ${short}"
+    y=$(( (WIDTH - ${#short}) / 2 ))
     [ "${y}" -lt 0 ] && y=0
     tput cup $x $y
     echo -ne "${mes}"
