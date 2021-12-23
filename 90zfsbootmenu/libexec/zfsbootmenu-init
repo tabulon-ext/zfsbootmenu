@@ -194,7 +194,8 @@ fi
 if [ "${menu_timeout}" -ge 0 ] && [ -n "${BOOTFS}" ]; then
   # Draw a countdown menu
   # shellcheck disable=SC2154
-  if delay="${menu_timeout}" prompt="Booting ${BOOTFS} in \033[0;33m%0.${#menu_timeout}d\033[0m seconds" timed_prompt "\033[0;32m[ENTER]\033[0m to boot" "\033[0;31m[ESC]\033[0m boot menu" ; then
+  if delay="${menu_timeout}" prompt="Booting \033[1;34m${BOOTFS}\033[0m in \033[0;33m%0.${#menu_timeout}d\033[0m seconds" \
+    timed_prompt "\033[0;32m[ENTER]\033[0m to boot" "\033[0;31m[ESC]\033[0m boot menu" "" ; then
     # This lock file is present if someone has SSH'd to take control
     # Do not attempt to automatically boot if present
     if [ ! -e "${BASE}/active" ] ; then
