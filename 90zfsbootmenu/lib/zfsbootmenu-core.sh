@@ -324,9 +324,10 @@ kexec_kernel() {
     zerror "unable to load ${mnt}${kernel} and ${mnt}${initramfs} into memory"
     zerror "${output}"
     umount "${mnt}"
-    color=red delay=10 timed_prompt "Unable to load kernel or initramfs into memory" \
-      "${mnt}${kernel}" \
-      "${mnt}${initramfs}"
+    timed_prompt -d 10 \
+      -m "$( colorize red 'Unable to load kernel or initramfs into memory' )" \
+      -m "$( colorize orange "${mnt}${kernel}" )" \
+      -m "$( colorize orange "${mnt}${initramfs}" )"
 
     return 1
   else
@@ -358,7 +359,8 @@ kexec_kernel() {
   if ! output="$( kexec -e -i 2>&1 )"; then
     zerror "kexec -e -i failed!"
     zerror "${output}"
-    color=red delay=10 timed_prompt "kexec run of ${kernel} failed!"
+    timed_prompt -d 10 \
+      -m "$( colorize red "kexec run of ${kernel} failed!" )"
     return 1
   fi
 }
@@ -566,9 +568,9 @@ rollback_snapshot() {
   fi
 
   if ! find_be_kernels "${snap}" >/dev/null; then
-    color=red delay=10 timed_prompt \
-      "Snapshot ${snap} has no kernels, will not roll back" \
-      "Use a recovery shell to manually force rollback"
+    timed_prompt -d 10 \
+      -m "$( colorize red "Snapshot ${snap} has no kernels, will not roll back" )"\
+      -m "$( colorize red "Use a recovery shell to manually force rollback" )"
     return 1
   fi
 
@@ -1009,11 +1011,13 @@ preload_be_cmdline() {
   fi
 
   # It is not an error if user declines automatic migration
-  if ! color=green delay=60 prompt="Will attempt migration in %0.2d seconds" \
-      timed_prompt "Using KCL from ${deprecated} on ${fs}" \
-      "This behavior is DEPRECATED and will be removed soon" "" \
-      "KCL should be migrated to an org.zfsbootmenu:commandline property" "" \
-      "[RETURN] to migrate" "[ESCAPE] to ignore "; then
+  if ! timed_prompt -d 60 \
+        -p "Will attempt migration in %0.2d seconds" \
+        -m "$( colorize green "Using KCL from ${deprecated} on ${fs}" )" \
+        -m "$( colorize green "This behavior is DEPRECATED and will be removed soon" )" \
+        -m "" \
+        -m "KCL should be migrated to an org.zfsbootmenu:commandline property" \
+        -m "" ; then
     # Suppress repeated messages
     export zbm_ignore_kcl_deprecation=1
     echo 'export zbm_ignore_kcl_deprecation="1"' >> /etc/zfsbootmenu.conf
@@ -1314,36 +1318,48 @@ has_resume_device() {
 }
 
 timed_prompt() {
-  local prompt x y cnum
+  local prompt delay message x y
 
-  [ $# -gt 0 ] || return
-  [ -n "${delay}" ] || delay="30"
-  [ -n "${prompt}" ] || prompt="Press [RETURN] or wait %0.${#delay}d seconds to continue"
+  delay="30"
+  prompt="Press [RETURN] or wait %0.${#delay}d seconds to continue"
+  message=()
 
-  [ "${delay}" -eq 0 ] && return
+  local opt OPTIND
+  while getopts "d:p:m:" opt; do
+    case "${opt}" in
+      d)
+        delay="${OPTARG}"
+        zdebug "delay set to ${delay}"
+        ;;
+      p)
+        prompt="${OPTARG}"
+        zdebug "prompt set to ${prompt}"
+        ;;
+      m)
+        message+=( "${OPTARG}" )
+        zdebug "adding '${OPTARG}' to messages"
+        ;;
+      *)
+        ;;
+    esac
+  done
 
-  # shellcheck disable=SC2154
-  case "${color}" in
-    red) cnum=1 ;;
-    green) cnum=2 ;;
-    yellow) cnum=3 ;;
-    blue) cnum=4 ;;
-    magenta) cnum=5 ;;
-    cyan) cnum=6 ;;
-    *) cnum="" ;;
-  esac
+  local x y lines
+
+  lines="${#message[@]}"
+  zdebug "${lines} lines of messages"
+
+  [ "${lines}" -gt 0 ] || return 1
 
   tput civis
   HEIGHT=$( tput lines )
   WIDTH=$( tput cols )
   tput clear
 
-  x=$(( ( (HEIGHT - 0 ) / 2 ) - $# ))
+  x=$(( ( (HEIGHT - 0 ) / 2 ) - lines ))
   [ "${x}" -lt 0 ] && x=0
 
-  [ -n "${cnum}" ] && tput setaf "${cnum}"
-  while [ $# -gt 0 ]; do
-    local line=${1}
+  for line in "${message[@]}"; do
     short="$( stripcolors "${line}" )"
     y=$(( (WIDTH - ${#short}) / 2 ))
     [ "${y}" -lt 0 ] && y=0
@@ -1352,7 +1368,6 @@ timed_prompt() {
     x=$(( x + 1 ))
     shift
   done
-  [ -n "${cnum}" ] && tput sgr0
 
   for (( i=delay; i>0; i-- )); do
     # shellcheck disable=SC2059
@@ -1510,7 +1525,9 @@ set_rw_pool() {
 
   if grep -q "${pool}" "${BASE}/degraded" >/dev/null 2>&1; then
     zdebug "prohibited: ${BASE}/degraded is set"
-    color=red delay=10 timed_prompt "Operation prohibited" "Pool '${pool}' cannot be imported read-write"
+    timed_prompt -d 10 \
+      -m "$( colorize red "Operation prohibited" )" \
+      -m "$( colorize red "Pool '${pool}' cannot be imported read-write" )"
     return 1
   fi
 
