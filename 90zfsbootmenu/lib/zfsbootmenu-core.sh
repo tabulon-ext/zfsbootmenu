@@ -1318,7 +1318,7 @@ has_resume_device() {
 }
 
 timed_prompt() {
-  local prompt delay message x y
+  local prompt delay message
 
   delay="30"
   prompt="Press [RETURN] or wait %0.${#delay}d seconds to continue"
