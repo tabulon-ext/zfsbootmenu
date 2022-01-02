@@ -1530,7 +1530,7 @@ set_rw_pool() {
     zdebug "prohibited: ${BASE}/degraded is set"
     timed_prompt -d 10 \
       -m "$( colorize red "Operation prohibited" )" \
-      -m "$( colorize red "Pool '$( colorize cyan "${pool}" )' cannot be imported $( colorize red "read-write" )" )"
+      -m "Pool '$( colorize cyan "${pool}" )' cannot be imported $( colorize red "read-write" )"
     return 1
   fi
 
