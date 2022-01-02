@@ -1016,7 +1016,7 @@ preload_be_cmdline() {
         -m "$( colorize green "Using KCL from ${deprecated} on ${fs}" )" \
         -m "$( colorize green "This behavior is DEPRECATED and will be removed soon" )" \
         -m "" \
-        -m "KCL should be migrated to an org.zfsbootmenu:commandline property" \
+        -m "KCL should be migrated to an $( colorize orange "org.zfsbootmenu:commandline" ) property" \
         -m "" ; then
     # Suppress repeated messages
     export zbm_ignore_kcl_deprecation=1
