@@ -1012,12 +1012,12 @@ preload_be_cmdline() {
 
   # It is not an error if user declines automatic migration
   if ! timed_prompt -d 60 \
-        -p "Will attempt migration in %0.2d seconds" \
-        -m "$( colorize green "Using KCL from ${deprecated} on ${fs}" )" \
-        -m "$( colorize green "This behavior is DEPRECATED and will be removed soon" )" \
-        -m "" \
-        -m "KCL should be migrated to an $( colorize orange "org.zfsbootmenu:commandline" ) property" \
-        -m "" ; then
+    -p "Will attempt migration in $( colorize yellow "%0.2d" ) seconds" \
+    -m "$( colorize green "Using KCL from ${deprecated} on ${fs}" )" \
+    -m "$( colorize green "This behavior is DEPRECATED and will be removed soon" )" \
+    -m "" \
+    -m "KCL should be migrated to an $( colorize orange "org.zfsbootmenu:commandline" ) property" ; then
+
     # Suppress repeated messages
     export zbm_ignore_kcl_deprecation=1
     echo 'export zbm_ignore_kcl_deprecation="1"' >> /etc/zfsbootmenu.conf
@@ -1321,7 +1321,7 @@ timed_prompt() {
   local prompt delay message
 
   delay="30"
-  prompt="Press [RETURN] or wait %0.${#delay}d seconds to continue"
+  prompt="Press $( colorize green "[RETURN]") or wait $( colorize yellow "%0.${#delay}d" ) seconds to continue"
   message=()
 
   local opt OPTIND
@@ -1343,6 +1343,9 @@ timed_prompt() {
         ;;
     esac
   done
+
+  # Add a blank line between any messages and the prompt
+  message+=( "" )
 
   local x y lines
 
@@ -1527,7 +1530,7 @@ set_rw_pool() {
     zdebug "prohibited: ${BASE}/degraded is set"
     timed_prompt -d 10 \
       -m "$( colorize red "Operation prohibited" )" \
-      -m "$( colorize red "Pool '${pool}' cannot be imported read-write" )"
+      -m "$( colorize red "Pool '$( colorize cyan "${pool}" )' cannot be imported $( colorize red "read-write" )" )"
     return 1
   fi
 
