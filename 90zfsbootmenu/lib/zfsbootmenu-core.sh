@@ -1317,6 +1317,15 @@ has_resume_device() {
   return 1
 }
 
+# getopts arguments:
+# -d  prompt countdown/delay
+# -p  prompt with countdown timer (%0.xd)
+# -m+ message to be printed above the prompt, usable multiple times
+# -r  message to be prefixed with [RETURN] (accept)
+# -e  message to be prefixed with [ESCAPE] (reject)
+#
+# -m, -r, -e are print in the order they are passed into the function
+
 timed_prompt() {
   local prompt delay message
 
@@ -1325,19 +1334,22 @@ timed_prompt() {
   message=()
 
   local opt OPTIND
-  while getopts "d:p:m:" opt; do
+  while getopts "d:p:m:r:e:" opt; do
     case "${opt}" in
       d)
         delay="${OPTARG}"
-        zdebug "delay set to ${delay}"
         ;;
       p)
         prompt="${OPTARG}"
-        zdebug "prompt set to ${prompt}"
         ;;
       m)
         message+=( "${OPTARG}" )
-        zdebug "adding '${OPTARG}' to messages"
+        ;;
+      r)
+        message+=( "$( colorize green "[RETURN]" ) ${OPTARG}" )
+        ;;
+      e)
+        message+=( "$( colorize red "[ESCAPE]" ) ${OPTARG}" )
         ;;
       *)
         ;;
@@ -1350,7 +1362,6 @@ timed_prompt() {
   local x y lines
 
   lines="${#message[@]}"
-  zdebug "${lines} lines of messages"
 
   [ "${lines}" -gt 0 ] || return 1
 

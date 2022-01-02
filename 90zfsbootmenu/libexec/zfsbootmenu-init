@@ -138,8 +138,8 @@ while true; do
   # Just keep retrying after a delay until the user presses ESC
   if timed_prompt -d "${zbm_import_delay:-5}" \
     -p "Unable to import $( colorize magenta "${try_pool:-pool}" ), retrying in $( colorize yellow "%0.2d" ) seconds" \
-    -m "$( colorize green "[RETURN] ") to retry immediately" \
-    -m "$( colorize red "[ESCAPE]" ) for a recovery shell"; then
+    -r "to retry immediately" \
+    -e "for a recovery shell"; then
       continue
   fi
 
@@ -199,8 +199,8 @@ if [ "${menu_timeout}" -ge 0 ] && [ -n "${BOOTFS}" ]; then
   # shellcheck disable=SC2154
   if timed_prompt -d "${menu_timeout}" \
     -p "Booting $( colorize cyan "${BOOTFS}" ) in $( colorize yellow "%0.${#menu_timeout}d" ) seconds" \
-    -m "$( colorize green '[RETURN]' ) to boot" \
-    -m "$( colorize red '[ESCAPE]' ) boot menu" ; then
+    -r "boot now " \
+    -e "boot menu" ; then
     # This lock file is present if someone has SSH'd to take control
     # Do not attempt to automatically boot if present
     if [ ! -e "${BASE}/active" ] ; then
