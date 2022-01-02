@@ -9,7 +9,7 @@ readonly _ZFSBOOTMENU_CORE=1
 # prints: text with color sequences removed
 # returns: nothing
 
-stripcolors() {
+decolorize() {
   # Written as two pattern replacements since extglob isn't enabled
   line="${1//\\033\[[0-1];3[0-7]m/}"
   line="${line//\\033\[0m/}"
@@ -1363,7 +1363,7 @@ timed_prompt() {
   [ "${x}" -lt 0 ] && x=0
 
   for line in "${message[@]}"; do
-    short="$( stripcolors "${line}" )"
+    short="$( decolorize "${line}" )"
     y=$(( (WIDTH - ${#short}) / 2 ))
     [ "${y}" -lt 0 ] && y=0
     tput cup $x $y
@@ -1375,7 +1375,7 @@ timed_prompt() {
   for (( i=delay; i>0; i-- )); do
     # shellcheck disable=SC2059
     mes="$( printf "${prompt}" "${i}" )"
-    short="$( stripcolors "${mes}" )"
+    short="$( decolorize "${mes}" )"
     y=$(( (WIDTH - ${#short}) / 2 ))
     [ "${y}" -lt 0 ] && y=0
     tput cup $x $y

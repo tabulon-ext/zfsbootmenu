@@ -199,8 +199,8 @@ if [ "${menu_timeout}" -ge 0 ] && [ -n "${BOOTFS}" ]; then
   # shellcheck disable=SC2154
   if timed_prompt -d "${menu_timeout}" \
     -p "Booting $( colorize cyan "${BOOTFS}" ) in $( colorize yellow "%0.${#menu_timeout}d" ) seconds" \
-    -m "$( colorize green '[ENTER]' ) to boot" \
-    -m "$( colorize red '[ESC]' ) boot menu" ; then
+    -m "$( colorize green '[RETURN]' ) to boot" \
+    -m "$( colorize red '[ESCAPE]' ) boot menu" ; then
     # This lock file is present if someone has SSH'd to take control
     # Do not attempt to automatically boot if present
     if [ ! -e "${BASE}/active" ] ; then
