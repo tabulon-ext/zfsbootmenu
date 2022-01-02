@@ -27,8 +27,9 @@ mkdir -p "${BASE}"
 
 while [ ! -e "${BASE}/initialized" ]; do
   if ! timed_prompt -d 5 \
-        -p "Press [ESC] to cancel" \
-        -m "Waiting for ZFSBootMenu initialization"; then
+    -p "$( colorize red '[ESCAPE]' ) to cancel" \
+    -m "Waiting for ZFSBootMenu initialization"; then
+
     zdebug "exited while waiting for initialization"
     tput cnorm
     tput clear
@@ -41,8 +42,9 @@ done
 # If the takeover fails for some reason, spin until it ends
 while [ -e "${BASE}/active" ]; do
   if ! timed_prompt -d 1 \
-        -p "Press [ESC] to cancel" \
-        -m "Waiting for other ZFSBootMenu instance to terminate"; then
+    -p "$( colorize red '[ESCAPE]' ) to cancel" \
+    -m "Waiting for other ZFSBootMenu instance to terminate"; then
+
     zdebug "exited while waiting to own ${BASE}/active"
     tput cnorm
     tput clear
