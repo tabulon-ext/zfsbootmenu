@@ -1,4 +1,10 @@
 *.img
 *.swp
 */*.swp
+.vscode/
+__pycache__/
 releases/*
+testing/stubs/local.*
+build
+hostid
+zpool.cache

@@ -1,5 +1,27 @@
 name: Analyze scripts
-on: [ push ] 
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '**.sh'
+      - 'bin/**'
+      - 'initcpio/**'
+      - 'testing/**'
+      - 'zfsbootmenu/bin/**'
+      - 'zfsbootmenu/libexec/**'
+  pull_request:
+    paths:
+      - '**.sh'
+      - 'bin/**'
+      - 'initcpio/**'
+      - 'testing/**'
+      - 'zfsbootmenu/bin/**'
+      - 'zfsbootmenu/libexec/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   shellcheck:
@@ -10,3 +32,5 @@ jobs:
 
     - name: Run ShellCheck
       uses: ludeeus/action-shellcheck@master
+      with:
+        severity: warning

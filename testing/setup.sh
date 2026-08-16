@@ -4,10 +4,14 @@
 YAML=0
 GENZBM=0
 IMAGE=0
-CONFD=0
-DRACUT=0
+MKINITCPIO=0
 SIZE="5G"
 POOL_PREFIX="ztest"
+
+# Dracut setup requires a local installation to work
+# In "all" mode, dracut is opportunistic
+DRACUT="no"
+CONFD=0
 
 DISTROS=()
 
@@ -15,24 +19,53 @@ DISTROS=()
 dictfile="/usr/share/dict/words"
 
 usage() {
+  local compat_dir
+  compat_dir="/usr/share/zfs/compatibility.d/"
+
   cat <<EOF
-Usage: $0 [options]
+USAGE: $0 [options]
+
+OPTIONS
+
+  -h  Display this message and exit
   -y  Create local.yaml
   -g  Create a generate-zbm symlink
-  -c  Create dracut.conf.d
+  -c  Create dracut.conf.d (if dracut is enabled)
   -d  Create a local dracut tree for local mode
+  -m  Create mkinitcpio.conf
   -i  Create a test VM image
-  -a  Perform all setup options
+  -a  Perform all create options
   -D  Specify a test directory to use
   -s  Specify size of VM image
   -e  Enable native ZFS encryption
-  -l  Disable features for legacy (zfs<2.0.0) support
   -p  Specify a pool name
   -r  Use a randomized pool name
   -x  Use an existing pool image
   -k  Populate host SSH host and authorized keys
+  -M  Build the test image on bare metal rather than a VM
+  -E  Add a variable to the image-creation environment
   -o  Distribution to install (may specify more than one)
-      [ void, void-musl, alpine, arch, debian, ubuntu ]
+      [ void, void-musl, alpine, chimera, arch, debian, ubuntu ]
+
+ENVIRONMENT VARIABLES
+
+  Certain variables, when set with -E, allow customization of test images:
+
+  RELEASE (Debian, Ubuntu)
+  Specify a particular release to install in the test image
+  (e.g., "bullseye", "bookworm" or "buster" for Debian; "kinetic" or "jammy" for ubuntu)
+
+  APT_REPOS (Debian, Ubuntu)
+  Specify a space-separated list of specific repositories to configure for apt
+  (e.g., "main universe multiverse")
+
+  KERNEL (Void)
+  Set KERNEL to the Void kernel series to use (e.g., "linux5.10", "linux6.1")
+
+  ZPOOL_COMPAT (All)
+  Set ZPOOL_COMPAT to one of the ZFS pool compatiblity targets listed below.
+
+$( find "${compat_dir}" -type f | sort | sed "s|${compat_dir}||" | column | sed 's/^/\t/' )
 EOF
 }
 
@@ -51,7 +84,12 @@ if [ $# -eq 0 ]; then
   exit
 fi
 
-while getopts "heycgdaiD:s:o:lp:rxk" opt; do
+# Environment variables to set for the image creation
+ENVIRONS=(
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+
+while getopts "heycgdaiD:s:o:lp:rxkmE:M" opt; do
   case "${opt}" in
     e)
       ENCRYPT=1
@@ -66,17 +104,22 @@ while getopts "heycgdaiD:s:o:lp:rxk" opt; do
       IMAGE=1
       ;;
     d)
-      DRACUT=1
+      DRACUT="yes"
       ;;
     g)
       GENZBM=1
+      ;;
+    m)
+      MKINITCPIO=1
       ;;
     a)
       YAML=1
       CONFD=1
       IMAGE=1
-      DRACUT=1
       GENZBM=1
+      MKINITCPIO=1
+      # Dracut is opportunistic unless forced earlier
+      [ "${DRACUT}" = yes ] || DRACUT="maybe"
       ;;
     D)
       TESTDIR="${OPTARG}"
@@ -86,9 +129,6 @@ while getopts "heycgdaiD:s:o:lp:rxk" opt; do
       ;;
     o)
       DISTROS+=( "${OPTARG}" )
-      ;;
-    l)
-      LEGACY_POOL=1
       ;;
     p)
       POOL_PREFIX="${OPTARG}"
@@ -104,9 +144,20 @@ while getopts "heycgdaiD:s:o:lp:rxk" opt; do
     k)
       INCLUDE_KEYS=1
       ;;
+    E)
+      ENVIRONS+=( "${OPTARG}" )
+      ;;
+    M)
+      BARE_METAL=1
+      ;;
+    h)
+      usage
+      exit 0
+      ;;
     *)
       usage
-      exit
+      exit 1
+      ;;
   esac
 done
 
@@ -124,33 +175,95 @@ TESTDIR="$(realpath "${TESTDIR}")" || exit 1
 # Make sure the test directory exists
 mkdir -p "${TESTDIR}" || exit 1
 
-if ((CONFD)) && [ ! -d "${TESTDIR}/dracut.conf.d" ]; then
-  echo "Creating dracut.conf.d"
-  cp -Rp ../etc/zfsbootmenu/dracut.conf.d "${TESTDIR}"
+# If dracut is opportunistic, determine if it should be available
+if [ "${DRACUT}" = "maybe" ]; then
+  if [ -d /usr/lib/dracut ] && command -v dracut >/dev/null 2>&1; then
+    DRACUT="yes"
+  else
+    DRACUT="no"
+  fi
 fi
 
-if ((DRACUT)) ; then
-  if [ ! -d /usr/lib/dracut ]; then
-    echo "ERROR: missing /usr/lib/dracut"
-    exit 1
-  fi
-
+if [ "${DRACUT}" = "yes" ]; then
   DRACUTBIN="$(command -v dracut)"
   if [ ! -x "${DRACUTBIN}" ]; then
     echo "ERROR: missing dracut script"
     exit 1
   fi
 
-  if [ ! -d "${TESTDIR}/dracut" ]; then
-    echo "Creating local dracut tree"
-    cp -a /usr/lib/dracut "${TESTDIR}"
-    cp "${DRACUTBIN}" "${TESTDIR}/dracut"
+  if [ ! -d /usr/lib/dracut ]; then
+    echo "ERROR: missing /usr/lib/dracut"
+    exit 1
   fi
 
-  # Make sure the zfsbootmenu module is a link to the repo version
-  _dracut_mods="${TESTDIR}/dracut/modules.d"
-  test -d "${_dracut_mods}" && rm -rf "${_dracut_mods}/90zfsbootmenu"
-  ln -s "$(realpath -e ../90zfsbootmenu)" "${_dracut_mods}"
+  ## Populate dracut and dracut.conf.d trees if needed or demanded
+  if ((CONFD)) || [ ! -d "${TESTDIR}/dracut.conf.d" ]; then
+    if [ -d "${TESTDIR}/dracut.conf.d" ]; then
+      echo "Re-creating dracut.conf.d"
+      rm -r "${TESTDIR}/dracut.conf.d"
+    else
+      echo "Creating dracut.conf.d"
+    fi
+
+    if ! cp -Rp ../etc/zfsbootmenu/dracut.conf.d "${TESTDIR}"; then
+      echo "ERROR: failed to create dracut.conf.d"
+      exit 1
+    fi
+
+    cat >> "${TESTDIR}/dracut.conf.d/zfsbootmenu.conf" <<-EOF
+	zfsbootmenu_module_root="$( realpath -e ../zfsbootmenu )"
+	zfsbootmenu_hook_root="${TESTDIR}/hooks"
+	EOF
+  fi
+
+  if ((CONFD)) || [ ! -d "${TESTDIR}/dracut" ]; then
+    if [ -d "${TESTDIR}/dracut" ]; then
+      echo "Re-creating local dracut tree"
+      rm -r "${TESTDIR}/dracut"
+    else
+      echo "Creating local dracut tree"
+    fi
+
+    cp -a /usr/lib/dracut "${TESTDIR}"
+    cp "${DRACUTBIN}" "${TESTDIR}/dracut"
+
+    # Make sure the zfsbootmenu module is a link to the repo version
+    _zbm_mod="${TESTDIR}/dracut/modules.d/90zfsbootmenu"
+    if [ -L "${_zbm_mod}" ]; then
+      rm "${_zbm_mod}"
+    elif [ -d "${_zbm_mod}" ]; then
+      rm -r "${_zbm_mod}"
+    fi
+
+    ln -Tsf "$(realpath -e ../dracut)" "${_zbm_mod}"
+  fi
+fi
+
+if ((MKINITCPIO)) ; then
+  cat <<-EOF > "${TESTDIR}/mkinitcpio.conf"
+	for snippet in $( realpath -e "${TESTDIR}" )/mkinitcpio.d/*.conf ; do
+	  source \${snippet}
+	done
+	EOF
+
+  MKINITCPIOD="${TESTDIR}/mkinitcpio.d"
+  mkdir -p "${MKINITCPIOD}"
+
+  cat <<-EOF > "${MKINITCPIOD}/base.conf"
+	MODULES=(ahci.ko)
+	BINARIES=()
+	FILES=()
+	HOOKS=(base udev autodetect modconf block filesystems keyboard)
+	COMPRESSION="cat"
+	EOF
+
+  cat <<-EOF > "${MKINITCPIOD}/modroot.conf"
+	zfsbootmenu_module_root="$( realpath -e ../zfsbootmenu )"
+	EOF
+
+  cat <<-EOF > "${MKINITCPIOD}/hooks.conf"
+	zfsbootmenu_hook_root="${TESTDIR}/hooks"
+	EOF
 fi
 
 if ((GENZBM)) ; then
@@ -173,6 +286,8 @@ if ((YAML)) ; then
   yq-go eval ".Global.DracutConfDir = \"${TESTDIR}/dracut.conf.d\"" -i "${yamlconf}"
   yq-go eval ".Global.PreHooksDir = \"${TESTDIR}/generate-zbm.pre.d\"" -i "${yamlconf}"
   yq-go eval ".Global.PostHooksDir = \"${TESTDIR}/generate-zbm.post.d\"" -i "${yamlconf}"
+  yq-go eval ".Global.InitCPIOConfig = \"${TESTDIR}/mkinitcpio.conf\"" -i "${yamlconf}"
+  yq-go eval ".Global.InitCPIOHookDirs = [ \"$( realpath -e ../initcpio )\",\"/usr/lib/initcpio\" ]" -i "${yamlconf}"
   yq-go eval ".Global.DracutFlags = [ \"--local\" ]" -i "${yamlconf}"
   yq-go eval "del(.Global.BootMountPoint)" -i "${yamlconf}"
   yq-go eval -P -C "${yamlconf}"
@@ -221,26 +336,54 @@ fi
 # Create image(s) for each specified distro
 if ((IMAGE)); then
   for DISTRO in "${DISTROS[@]}"; do
-    IMAGE_SCRIPT="./helpers/image-${DISTRO}.sh"
-    if [ ! -x "${IMAGE_SCRIPT}" ]; then
-      IMAGE_SCRIPT="./helpers/image.sh"
-    fi
+    builder_args=( )
+    for environ in "${ENVIRONS[@]}"; do
+      builder_args+=( "-E" "${environ}" )
+    done
 
-    if command -v doas >/dev/null 2>&1; then
-      SUDO=doas
-    elif command -v sudo >/dev/null 2>&1; then
-      SUDO=sudo
+    if ((EXISTING_POOL)); then
+      builder_args+=( "-x" )
     else
-      echo "ERROR: unable to elevate user privileges, install sudo or doas"
-      exit 1
+      if ! qemu-img create "${TESTDIR}/${POOL_NAME}-pool.img" "${SIZE}"; then
+        echo "ERROR: failed to create pool image"
+        exit 1
+      fi
+
+      AUTO_POOL_COMPAT=1
+      for environ in "${ENVIRONS[@]}"; do
+        [[ "${environ}" =~ "^ZPOOL_COMPAT=" ]] || continue
+        AUTO_POOL_COMPAT=0
+        break
+      done
+
+      if ((AUTO_POOL_COMPAT)); then
+        case "${DISTRO}" in
+          debian|ubuntu) builder_args+=( -c "openzfs-2.0-linux" ) ;;
+        esac
+      fi
     fi
 
-    "${SUDO}" unshare --fork --pid --mount env \
-      ENCRYPT="${ENCRYPT}" \
-      LEGACY_POOL="${LEGACY_POOL}" \
-      EXISTING_POOL="${EXISTING_POOL}" \
-      PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin" \
-      "${IMAGE_SCRIPT}" "${TESTDIR}" "${SIZE}" "${DISTRO}" "${POOL_NAME}"
+    if ((ENCRYPT)); then
+      builder_args+=( -e "${TESTDIR}/${POOL_NAME}.key" )
+    fi
+
+    builder_args+=( "${DISTRO}" "${POOL_NAME}" "${TESTDIR}" )
+
+    if ((BARE_METAL)); then
+      if command -v doas >/dev/null 2>&1; then
+        SUDO=doas
+      elif command -v sudo >/dev/null 2>&1; then
+        SUDO=sudo
+      else
+        echo "ERROR: unable to elevate user privileges, install sudo or doas"
+        exit 1
+      fi
+
+      "${SUDO}" unshare --fork --pid --mount \
+        ./helpers/builder-host.sh "${builder_args[@]}"
+    else
+      ./helpers/builder-qemu.sh "${builder_args[@]}"
+    fi
 
     # All subsequent distros use the same pool
     EXISTING_POOL=1

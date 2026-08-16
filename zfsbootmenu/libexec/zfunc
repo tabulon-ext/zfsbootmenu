@@ -1,0 +1,30 @@
+#!/bin/bash
+# vim: softtabstop=2 shiftwidth=2 expandtab
+
+# shellcheck disable=SC1091
+sources=(
+  /lib/profiling-lib.sh
+  /etc/zfsbootmenu.conf
+  /lib/kmsg-log-lib.sh
+  /lib/zfsbootmenu-core.sh
+  /lib/zfsbootmenu-ui.sh
+)
+
+for src in "${sources[@]}"; do
+  # shellcheck disable=SC1090
+  if ! source "${src}" >/dev/null 2>&1 ; then
+    echo "<3>ZFSBootMenu: unable to source '${src}' in $0" > /dev/kmsg
+    exit 1
+  fi
+done
+
+unset src sources
+
+# First argument is the function name
+# the rest are positional params
+func="${1}"
+shift
+
+zdebug "Calling ${func} with $*"
+
+$func "$@"

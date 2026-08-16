@@ -1,0 +1,9 @@
+.. code-block:: bash
+
+  refind-install
+  rm /boot/refind_linux.conf
+
+  cat << EOF > /boot/efi/EFI/ZBM/refind_linux.conf
+  "Boot default"  "quiet loglevel=0 zbm.skip"
+  "Boot to menu"  "quiet loglevel=0 zbm.show"
+  EOF

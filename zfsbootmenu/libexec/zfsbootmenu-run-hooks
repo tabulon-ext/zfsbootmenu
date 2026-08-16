@@ -1,0 +1,50 @@
+#!/bin/bash
+# vim: softtabstop=2 shiftwidth=2 expandtab
+
+# shellcheck disable=SC1091
+
+sources=(
+  /lib/profiling-lib.sh
+  /etc/zfsbootmenu.conf
+  /lib/kmsg-log-lib.sh
+)
+
+for src in "${sources[@]}"; do
+  # shellcheck disable=SC1090
+  source "${src}" >/dev/null 2>&1 || exit 1
+done
+
+ONE_SHOT_HOOKS=0
+if [ "${1}" = "-once" ]; then
+  ONE_SHOT_HOOKS=1
+  shift
+fi
+
+hook_stage="${1}"
+
+if [ -z "${hook_stage}" ]; then
+  zerror "required hook stage undefined"
+  exit 1
+fi
+
+if [ ! -d "/libexec/hooks/${hook_stage}" ]; then
+  zdebug "no hook directory for ${hook_stage}"
+  exit 1
+fi
+
+_ran_hook=
+for _hook in "/libexec/hooks/${hook_stage}"/*; do
+  [ -x "${_hook}" ] || continue
+  zinfo "processing ${_hook}"
+  "${_hook}"
+  _ran_hook="yes"
+
+  if [ "${ONE_SHOT_HOOKS}" -eq 1 ] >/dev/null 2>&1; then
+    zinfo "Disabling hook after execution: ${_hook}"
+    chmod 000 "${_hook}"
+    mv "${_hook}" "${_hook}.completed"
+  fi
+done
+
+# Return success if at least one hook ran
+[ -n "${_ran_hook}" ]

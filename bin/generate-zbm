@@ -4,10 +4,10 @@
 use strict;
 use warnings;
 
-our $VERSION = '1.12.0';
+our $VERSION = '3.1.0+dev';
 
 use Getopt::Long qw(:config no_ignore_case auto_version);
-use Pod::Usage qw(pod2usage);
+use Pod::Usage   qw(pod2usage);
 use File::Basename;
 use File::Temp qw(tempfile tempdir);
 use File::Copy;
@@ -15,6 +15,8 @@ use File::stat;
 use File::Path qw(make_path remove_tree);
 use File::Glob qw(:globally :nocase);
 use Sort::Versions;
+use Config;
+use bigint qw(hex);
 
 use Pod::Usage qw(pod2usage);
 
@@ -23,7 +25,6 @@ $Data::Dumper::Indent   = 1;
 $Data::Dumper::Sortkeys = 1;
 $Data::Dumper::Purity   = 1;
 
-use Config::IniFiles;
 use Sort::Versions;
 use YAML::PP;
 use boolean;
@@ -35,9 +36,10 @@ use constant REFARRAY => ref [];
 sub versionedKernel;
 sub latestKernel;
 sub createInitramfs;
+sub createUEFIBundle;
 sub execute;
 sub safeCopy;
-sub nonempty;
+sub has_value;
 sub cleanupMount;
 sub enabled;
 sub maxRevision;
@@ -45,8 +47,6 @@ sub groupKernels;
 sub pruneVersions;
 sub purgeFiles;
 sub verboseUnlink;
-sub convertConfig;
-sub convertImageConfig;
 
 BEGIN {
   $SIG{INT}  = \&cleanupMount;
@@ -54,10 +54,9 @@ BEGIN {
 }
 
 my ( %runConf, %config );
-my $default_config = "/etc/zfsbootmenu/config.yaml";
 
+$runConf{config}  = "/etc/zfsbootmenu/config.yaml";
 $runConf{bootdir} = "/boot";
-$runConf{confd}   = "/etc/zfsbootmenu/dracut.conf.d";
 
 GetOptions(
   "version|v=s" => \$runConf{version},
@@ -67,45 +66,21 @@ GetOptions(
   "bootdir|b=s" => \$runConf{bootdir},
   "confd|C=s"   => \$runConf{confd},
   "cmdline|l=s" => \$runConf{cmdline},
-  "migrate|m:s" => \$runConf{migrate},
   "config|c=s"  => \$runConf{config},
   "enable"      => \$runConf{enable},
   "disable"     => \$runConf{disable},
+  "initcpio|i!" => \$runConf{usecpio},
+  "hookd|H=s@"  => \$runConf{cpio_hookd},
   "debug|d"     => \$runConf{debug},
+  "showver|V"   => \$runConf{showver},
   "help|h"      => sub {
     pod2usage( -verbose => 2 );
     exit;
   },
-);
+) or exit 1;
 
-unless ( nonempty $runConf{config} ) {
-  $runConf{config} = $default_config;
-
-  # Implicitly request migration if default config does not exist
-  unless ( defined $runConf{migrate} or -f $runConf{config} ) {
-    printf "Configuration %s does not exist, attempting to migrate\n", $runConf{config};
-    $runConf{migrate} = "/etc/zfsbootmenu/config.ini";
-  }
-}
-
-# If migration explicitly requested or no config file exists, convert it
-if ( defined $runConf{migrate} ) {
-  my $inifile;
-
-  if ( nonempty $runConf{migrate} ) {
-    $inifile = $runConf{migrate};
-  } else {
-    $inifile = $runConf{config};
-    $inifile =~ s/(\.yaml)?$/.ini/i;
-  }
-
-  # If possible, make a backup of an existing output file
-  my $conf_backup = sprintf( "%s.backup", $runConf{config} );
-  if ( -f $runConf{config} and safeCopy( $runConf{config}, $conf_backup ) ) {
-    printf "Created backup %s -> %s\n", $runConf{config}, $conf_backup;
-  }
-
-  convertConfig( $inifile, $runConf{config} ) or exit 1;
+if ( defined $runConf{showver} and $runConf{showver} ) {
+  printf "%s\n", $VERSION;
   exit 0;
 }
 
@@ -117,20 +92,6 @@ if ( -r $runConf{config} ) {
   } or do {
     my $error = <<"EOF";
 Unable to parse configuration $runConf{config} as YAML.
-
-If this is a legacy configuration, migrate to the new format by running
-
-  $0 --migrate $runConf{config} [ --config <output> ],
-
-where `<output>` is the desired location of the converted file. If you
-omit the `--config` option, an output location
-
-  $default_config
-
-will be used by default.
-
-----
-
 EOF
     print $error;
 
@@ -166,14 +127,65 @@ unless ( $config{Global}{ManageImages} ) {
   exit;
 }
 
-# Override the location of our specific dracut.conf.d directory
-if ( nonempty $config{Global}{DracutConfDir} ) {
-  $runConf{confd} = $config{Global}{DracutConfDir};
+unless ( defined $runConf{usecpio} ) {
+
+  # If usecpio wasn't set by cmdline, try loading from the config
+  if ( defined $config{Global}{InitCPIO} ) {
+    $runConf{usecpio} = $config{Global}{InitCPIO};
+  } else {
+    my @output = execute(qw(sh -c "command -v dracut"));
+    my $status = pop(@output);
+    if ( $status eq 0 ) {
+      print "No initramfs generator specified; using dracut\n";
+      $runConf{usecpio} = false;
+    } else {
+      print "No initramfs generator specified; using mkinitcpio\n";
+      $runConf{usecpio} = true;
+    }
+  }
+}
+
+unless ( defined $runConf{confd} ) {
+
+  # Set initramfs configuration from defaults or config file
+
+  # Defaults and config key depend on initramfs generator
+  my $ckey;
+  if ( $runConf{usecpio} ) {
+    $runConf{confd} = "/etc/zfsbootmenu/mkinitcpio.conf";
+    $ckey = "InitCPIOConfig";
+  } else {
+    $runConf{confd} = "/etc/zfsbootmenu/dracut.conf.d";
+    $ckey = "DracutConfDir";
+  }
+
+  # Replace the default if a configuration option exists
+  if ( defined $config{Global}{$ckey} ) {
+    $runConf{confd} = $config{Global}{$ckey};
+  }
+}
+
+if ( $runConf{usecpio} and not defined $runConf{cpio_hookd} ) {
+
+  # With initcpio mode, load hookdirs from config when not specified on cmdline
+  my @hooks;
+
+  if ( defined $config{Global}{InitCPIOHookDirs} ) {
+    if ( ref $config{Global}{InitCPIOHookDirs} eq REFARRAY ) {
+      foreach my $hookd ( @{ $config{Global}{InitCPIOHookDirs} } ) {
+        push( @hooks, $hookd );
+      }
+    } else {
+      push( @hooks, $config{Global}{InitCPIOHookDirs} );
+    }
+  }
+
+  $runConf{cpio_hookd} = \@hooks;
 }
 
 # Ensure our bootloader partition is mounted
 $runConf{umount_on_exit} = 0;
-if ( nonempty $config{Global}{BootMountPoint} ) {
+if ( has_value $config{Global}{BootMountPoint} ) {
   my $mounted = 0;
 
   my @output = execute(qq(mountpoint $config{Global}{BootMountPoint}));
@@ -194,8 +206,8 @@ if ( nonempty $config{Global}{BootMountPoint} ) {
   }
 }
 
-if ( nonempty $config{Global}{PreHooksDir} and -d $config{Global}{PreHooksDir} ) {
-  while (my $hook = <$config{Global}{PreHooksDir}/*> ){
+if ( has_value $config{Global}{PreHooksDir} and -d $config{Global}{PreHooksDir} ) {
+  while ( my $hook = <$config{Global}{PreHooksDir}/*> ) {
     next unless -x $hook;
     Log("Processing hook: $hook");
     my @output = execute(qq($hook));
@@ -209,27 +221,27 @@ my $dir     = File::Temp->newdir();
 my $tempdir = $dir->dirname;
 
 # Config file may provide some default values for command-line args
-if ( nonempty $config{Kernel}{Path} and !nonempty $runConf{kernel} ) {
+if ( has_value $config{Kernel}{Path} and !has_value $runConf{kernel} ) {
   $runConf{kernel} = $config{Kernel}{Path};
 }
-if ( nonempty $config{Kernel}{Prefix} and !nonempty $runConf{kernel_prefix} ) {
+if ( has_value $config{Kernel}{Prefix} and !has_value $runConf{kernel_prefix} ) {
   $runConf{kernel_prefix} = $config{Kernel}{Prefix};
 }
 
-if ( nonempty $config{Kernel}{Version} and !nonempty $runConf{kernel_version} ) {
+if ( has_value $config{Kernel}{Version} and !has_value $runConf{kernel_version} ) {
   $runConf{kernel_version} = $config{Kernel}{Version};
   $runConf{kernel_version} =~ s/%current\b/%{current}/i;
 }
 
-if ( nonempty $config{Global}{Version} and !nonempty $runConf{version} ) {
+if ( has_value $config{Global}{Version} and !has_value $runConf{version} ) {
   $runConf{version} = $config{Global}{Version};
 }
 
-if ( nonempty $config{Kernel}{CommandLine} and !nonempty $runConf{cmdline} ) {
+if ( has_value $config{Kernel}{CommandLine} and !has_value $runConf{cmdline} ) {
   $runConf{cmdline} = $config{Kernel}{CommandLine};
 }
 
-if ( nonempty $runConf{version} ) {
+if ( has_value $runConf{version} ) {
   $runConf{version} =~ s/%current\b/%{current}/i;
   $runConf{version} =~ s/%\{current\}/$VERSION/i;
 } else {
@@ -237,7 +249,7 @@ if ( nonempty $runConf{version} ) {
 }
 
 # Map "%current" kernel version to output of `uname r`
-if ( nonempty $runConf{kernel_version} and $runConf{kernel_version} =~ /%\{current\}/i ) {
+if ( has_value $runConf{kernel_version} and $runConf{kernel_version} =~ /%\{current\}/i ) {
   my @uname  = execute(qw(uname -r));
   my $status = pop(@uname);
   unless ( $status eq 0 and scalar @uname ) {
@@ -248,7 +260,7 @@ if ( nonempty $runConf{kernel_version} and $runConf{kernel_version} =~ /%\{curre
   $runConf{kernel_version} =~ s/%\{current\}/$uname[0]/i;
 }
 
-if ( nonempty $runConf{kernel} ) {
+if ( has_value $runConf{kernel} ) {
 
   # Make sure the provided kernel file exists
   unless ( -f $runConf{kernel} ) {
@@ -258,15 +270,24 @@ if ( nonempty $runConf{kernel} ) {
 } else {
 
   # Try to determine a kernel file when one was not provided
-  if ( nonempty $runConf{kernel_version} ) {
-    $runConf{kernel} = versionedKernel $runConf{kernel_version};
-    unless ( nonempty $runConf{kernel} ) {
+  if ( has_value $runConf{kernel_version} ) {
+    my $exactVersion;
+    ( $runConf{kernel}, $exactVersion ) = versionedKernel $runConf{kernel_version};
+
+    # Make sure a kernel was found
+    unless ( has_value $runConf{kernel} ) {
       print "Unable to find file for kernel version $runConf{kernel_version}\n";
       exit 1;
     }
+
+    # If the kernel version was not exact, allow it to be determined later
+    unless ($exactVersion) {
+      undef $runConf{kernel_version};
+    }
+
   } else {
     $runConf{kernel} = latestKernel;
-    unless ( nonempty $runConf{kernel} ) {
+    unless ( has_value $runConf{kernel} ) {
       print "Unable to find latest kernel; specify version or path manually\n";
       exit 1;
     }
@@ -274,35 +295,33 @@ if ( nonempty $runConf{kernel} ) {
 }
 
 # Try to determine kernel_prefix or kernel_version if necessary
-unless ( nonempty $runConf{kernel_prefix} and nonempty $runConf{kernel_version} ) {
+unless ( has_value $runConf{kernel_version} ) {
 
   # Kernel version comes from either file name or internal strings
-  unless ( nonempty $runConf{kernel_version} ) {
-    $runConf{kernel_version} = kernelVersion( $runConf{kernel} );
-    unless ( nonempty $runConf{kernel_version} ) {
-      printf "Unable to determine kernel version from %s\n", $runConf{kernel};
-      exit 1;
-    }
-  }
-
-  unless ( nonempty $runConf{kernel_prefix} ) {
-
-    # Prefix is basename of file, less any "-<version>" suffix
-    $runConf{kernel_prefix} = basename( $runConf{kernel} );
-    $runConf{kernel_prefix} =~ s/-\Q$runConf{kernel_version}\E$//;
-    unless ( nonempty $runConf{kernel_prefix} ) {
-      printf "Unable to determine kernel prefix from %s\n", $runConf{kernel};
-      exit 1;
-    }
+  $runConf{kernel_version} = kernelVersion( $runConf{kernel} );
+  unless ( has_value $runConf{kernel_version} ) {
+    printf "Unable to determine kernel version from %s\n", $runConf{kernel};
+    exit 1;
   }
 }
 
-printf "Creating ZFSBootMenu %s from kernel %s\n", $runConf{version}, $runConf{kernel};
+unless ( has_value $runConf{kernel_prefix} ) {
+
+  # Prefix is basename of file, less any "-<version>" suffix
+  $runConf{kernel_prefix} = basename( $runConf{kernel} );
+  $runConf{kernel_prefix} =~ s/-\Q$runConf{kernel_version}\E$//;
+  unless ( has_value $runConf{kernel_prefix} ) {
+    printf "Unable to determine kernel prefix from %s\n", $runConf{kernel};
+    exit 1;
+  }
+}
+
+printf "Creating ZFSBootMenu %s from kernel %s\n", $VERSION, $runConf{kernel};
 
 my $spl_hostid = "/sys/module/spl/parameters/spl_hostid";
 if ( -f $spl_hostid ) {
   open PROC, $spl_hostid;
-  $runConf{hostid}{module} = sprintf("%08x", <PROC>);
+  $runConf{hostid}{module} = sprintf( "%08x", <PROC> );
   close PROC;
 } else {
   $runConf{hostid}{module} = "00000000";
@@ -314,22 +333,22 @@ if ( $runConf{hostid}{module} ne "00000000" and -f $etc_hostid ) {
   read SPL, my $hostid, 4;
   close SPL;
 
-  if ( unpack( 'c', pack( 's', 1 ) ) eq 1 ) {
-    # little endian
-    $runConf{hostid}{etc} = sprintf("%08x", unpack('L<4', $hostid));
-  } else {
-    # big endian
-    $runConf{hostid}{etc} = sprintf("%08x", unpack('L>4', $hostid));
-  }
+  $runConf{hostid}{etc} = sprintf( "%08x", unpack( 'L<4', $hostid ) );
 
-  if ($runConf{hostid}{module} ne $runConf{hostid}{etc}) {
+  if ( $runConf{hostid}{module} ne $runConf{hostid}{etc} ) {
     print "SPL ($runConf{hostid}{module}) and system ($runConf{hostid}{etc}) hostids do not match!\n";
   }
 }
 
+# Create the initramfs as long as some output will consume it
+my $initramfs;
+if ( enabled $config{EFI} or enabled $config{Components} ) {
+  $initramfs = createInitramfs( $tempdir, $runConf{kernel_version} );
+}
+
 # Create a unified kernel/initramfs/command line EFI file
 if ( enabled $config{EFI} ) {
-  my $unified_efi = createInitramfs( $tempdir, $runConf{kernel_version}, $runConf{kernel} );
+  my $unified_efi = createUEFIBundle( $tempdir, $runConf{kernel}, $initramfs );
 
   my $efi_target;
 
@@ -390,8 +409,6 @@ if ( enabled $config{EFI} ) {
 
 # Create a separate kernel / initramfs. Used by syslinux/extlinux/grub.
 if ( enabled $config{Components} ) {
-  my $initramfs = createInitramfs( $tempdir, $runConf{kernel_version} );
-
   my ( $kernel_target, $initramfs_target );
 
   my $component_prefix   = sprintf( "%s/%s", $config{Components}{ImageDir}, $runConf{kernel_prefix} );
@@ -482,71 +499,8 @@ if ( enabled $config{Components} ) {
   printf "Created kernel image %s\n",    $kernel_target;
 }
 
-# Generate syslinux.cfg, requires components to be built
-if ( enabled $config{Components}{syslinux} ) {
-  my $glob    = sprintf( "%s/%s-*", $config{Components}{ImageDir}, $runConf{kernel_prefix} );
-  my @listing = sort versioncmp glob($glob);
-
-  # Filter EFI files, in case they're in the same directory
-  my @components;
-  foreach my $entry (@listing) {
-    if ( $entry =~ /EFI$/i ) {
-      next;
-    }
-    push( @components, $entry );
-  }
-
-  $runConf{syslinux_temp} = join( '/', $tempdir, 'syslinux.conf' );
-  open CFG, '>', $runConf{syslinux_temp};
-
-  my $header = <<'EOF';
-UI menu.c32
-PROMPT 0
-
-MENU TITLE Boot Menu
-TIMEOUT 50
-EOF
-
-  print CFG $header;
-
-  my $add_default = 1;
-  while (@components) {
-    my $entry = pop(@components);
-
-    my $directory = dirname($entry);
-
-    # Strip the mountpoint prefix out to generate a correct path based on /
-    $directory =~ s/\Q$config{Global}{BootMountPoint}//;
-
-    my $kernel = basename($entry);
-    my ( undef, $version ) = split( '-', $kernel );
-    my $label      = "ZFSBootMenu-$version";
-    my $menu_label = "ZFSBootMenu $version";
-
-    if ($add_default) {
-      print CFG "DEFAULT $label\n\n";
-      $add_default--;
-    }
-
-    my $entry_text = <<"EOF";
-LABEL $label
-MENU LABEL $menu_label
-KERNEL $directory/$kernel
-INITRD $directory/initramfs-$version.img
-APPEND $runConf{cmdline}
-
-EOF
-    print CFG $entry_text;
-
-  }
-  close CFG;
-
-  make_path dirname( $config{Components}{syslinux}{Config} );
-  safeCopy( $runConf{syslinux_temp}, $config{Components}{syslinux}{Config} ) or exit 1;
-}
-
-if ( nonempty $config{Global}{PostHooksDir} and -d $config{Global}{PostHooksDir} ) {
-  while (my $hook = <$config{Global}{PostHooksDir}/*> ){
+if ( has_value $config{Global}{PostHooksDir} and -d $config{Global}{PostHooksDir} ) {
+  while ( my $hook = <$config{Global}{PostHooksDir}/*> ) {
     next unless -x $hook;
     Log("Processing hook: $hook");
     my @output = execute(qq($hook));
@@ -563,9 +517,20 @@ sub versionedKernel {
   my ( $kver, ) = @_;
 
   foreach my $prefix (qw(vmlinuz linux vmlinux kernel)) {
-    my $kernel = join( '/', ( $runConf{bootdir}, join( '-', ( $prefix, $kver ) ) ) );
-    if ( -f $kernel ) {
-      return $kernel;
+    my $pattern = join( '/', ( $runConf{bootdir}, join( '-', ( $prefix, $kver ) ) ) );
+
+    # Try an exact match first
+    if ( -f $pattern ) {
+      return $pattern, true;
+    }
+
+    # Otherwise, try to glob
+    my @kernels = sort versioncmp glob($pattern);
+
+    foreach my $candidate (@kernels) {
+      if ( -f $candidate ) {
+        return $candidate, false;
+      }
     }
   }
 
@@ -635,10 +600,10 @@ sub kernelVersion {
       my $ver = $1;
 
       # First version match is always the file version
-      $filever = $ver unless ( nonempty $filever );
+      $filever = $ver unless ( has_value $filever );
 
       # When there is no version from the file name, we have a match
-      last unless ( nonempty $namever );
+      last unless ( has_value $namever );
 
       # A version that equals the file version supersedes the first match
       if ( $namever eq $ver ) {
@@ -648,13 +613,16 @@ sub kernelVersion {
     }
   }
 
+  # Kernel is unusable if no version could be detected
+  return if ( !has_value $filever and !has_value $namever );
+
   # If only one is defined, that's the version
-  unless ( nonempty $filever ) {
+  unless ( has_value $filever ) {
     Log("No version found in kernel strings, using $namever from path $kernel");
     return $namever;
   }
 
-  unless ( nonempty $namever ) {
+  unless ( has_value $namever ) {
     Log("No version found in path $kernel, using $filever from kernel strings");
     return $filever;
   }
@@ -674,41 +642,245 @@ EOF
   return $namever;
 }
 
-# Returns the path to an initramfs, or dies with an error
+# Given a sections size, calculate where the next section should be placed,
+# while respecting the stub alignment value
+sub increaseBundleOffset {
+  my ( $step, $offset, $alignment ) = @_;
+  $offset += int( ( $step + $alignment - 1 ) / $alignment * $alignment );
+  Log( "New offset is: " . hex($offset) );
+  return $offset;
+}
+
+# Adds the commands necessary to put another section into the EFI bundle,
+# and then calculates where the bundle offset has been moved to
+sub addBundleSection {
+  my ( $cmds, $secname, $filename, $offset, $alignment ) = @_;
+
+  my $hex_offset = sprintf( "0x%X", $offset );
+  push( @$cmds, ( "--add-section", "$secname=\"$filename\"" ), qw(--change-section-vma), ("$secname=\"$hex_offset\""),
+  );
+
+  my $sb = stat($filename);
+  return increaseBundleOffset( $sb->size, $offset, $alignment );
+
+}
+
+# Creates a UEFI bundle from an initramfs and kernel
+# Returns the path to the bundle or dies with an error
+
+sub createUEFIBundle {
+  my ( $imagedir, $kernel, $initramfs ) = @_;
+
+  my $output_file = join( '/', $imagedir, "zfsbootmenu.EFI" );
+
+  unless ( -f $kernel and -f $initramfs ) {
+    print "Cannot find kernel or initramfs to create UEFI bundle\n";
+    exit 1;
+  }
+
+  my $uefi_stub;
+
+  if ( has_value $config{EFI}{Stub} ) {
+    $uefi_stub = $config{EFI}{Stub};
+    unless ( -f $uefi_stub ) {
+      print "UEFI stub loader '$uefi_stub' does not exist\n";
+      exit 1;
+    }
+  } else {
+
+    my @uefi_stub_defaults;
+    if ( $Config{archname} =~ m/x86_64/ ) {
+      push( @uefi_stub_defaults, '/usr/lib/systemd/boot/efi/linuxx64.efi.stub' );
+    } elsif ( $Config{archname} =~ m/aarch64/ ) {
+      push( @uefi_stub_defaults, '/usr/lib/systemd/boot/efi/linuxaa64.efi.stub' );
+    }
+
+    foreach my $stubloc (@uefi_stub_defaults) {
+      if ( -f $stubloc ) {
+        $uefi_stub = $stubloc;
+        last;
+      }
+    }
+
+    unless ( defined $uefi_stub and -f $uefi_stub ) {
+      print "Unable to find UEFI stub loader at default locations:\n";
+      foreach my $stubloc (@uefi_stub_defaults) {
+        print " $stubloc\n";
+      }
+      exit 1;
+    }
+  }
+
+  my ( $uki_alignment, $uki_offset );
+
+  # Determine stub alignment, most likely 4096
+  my @cmd = qw(objdump -p);
+  push( @cmd, $uefi_stub );
+
+  my @output = execute(@cmd);
+  my $status = pop(@output);
+  if ( $status eq 0 ) {
+    foreach my $line (@output) {
+      if ( $line =~ m/SectionAlignment\s+(\d+)/ ) {
+        Log( "Alignment is: " . hex($1) );
+        $uki_alignment = hex($1);
+      }
+    }
+  } else {
+    print "Unable to determine stub alignment!\n";
+    exit 1;
+  }
+
+  # Determine initial UKI offset value by grabbing the size and VMA of
+  # the last section of the EFI stub.
+  @cmd = qw(objdump -w -h);
+  push( @cmd, $uefi_stub );
+
+  @output = execute(@cmd);
+  $status = pop(@output);
+  if ( $status eq 0 ) {
+    my @sizes = split( /\s+/, @output[ scalar @output - 1 ] );
+
+    my $size = "0x" . $sizes[3];
+    my $vma  = "0x" . $sizes[4];
+    my $sum  = hex($size) + hex($vma);
+
+    $uki_offset = increaseBundleOffset( $sum, 0, $uki_alignment );
+    Log( "Initial offset is: " . hex($uki_offset) );
+  } else {
+    print "Unable to determine initial stub offset!\n";
+    exit 1;
+  }
+
+  @cmd = qw(objcopy);
+
+  my ( $hex_offset, $sb );
+
+  if ( -f "/etc/os-release" ) {
+    $uki_offset = addBundleSection( \@cmd, ".osrel", "/etc/os-release", $uki_offset, $uki_alignment );
+  }
+
+  if ( has_value $runConf{cmdline} ) {
+    my $cmdline = join( '/', $imagedir, "cmdline.txt" );
+
+    open( my $fh, '>', $cmdline );
+    print $fh $runConf{cmdline};
+    close($fh);
+
+    $uki_offset = addBundleSection( \@cmd, ".cmdline", $cmdline, $uki_offset, $uki_alignment );
+  }
+
+  if ( has_value $config{EFI}{SplashImage} and -f $config{EFI}{SplashImage} ) {
+
+    # only supported with systemd-boot's efistub,
+    # but gummiboot doesn't care if the section exists
+    $uki_offset = addBundleSection( \@cmd, ".splash", $config{EFI}{SplashImage}, $uki_offset, $uki_alignment );
+  }
+
+  if ( has_value $config{EFI}{DeviceTree} ) {
+    my $dtb_try;
+
+    if ( $config{EFI}{DeviceTree} =~ m,^/, ) {
+      if ( $config{EFI}{DeviceTree} =~ m/\Q%{kernel}/ ) {
+
+        # Possibly a templated file path
+        $dtb_try = $config{EFI}{DeviceTree};
+        $dtb_try =~ s/\Q%{kernel}/$runConf{kernel_version}/;
+      } else {
+
+        # Possibly an absolute path to a file
+        $dtb_try = $config{EFI}{DeviceTree};
+      }
+    } else {
+
+      # Possibly a partial path
+      $dtb_try = sprintf( "/boot/dtbs/dtbs-%s/%s", $runConf{kernel_version}, $config{EFI}{DeviceTree} );
+    }
+
+    if ( has_value $dtb_try ) {
+      if ( -f $dtb_try ) {
+        $uki_offset = addBundleSection( \@cmd, ".dtb", $dtb_try, $uki_offset, $uki_alignment );
+      } else {
+        printf "EFI.DeviceTree key set to '%s', file not found at '%s'\n", $config{EFI}{DeviceTree}, $dtb_try;
+        exit 1;
+      }
+    } else {
+      printf "EFI.DeviceTree key set to '%s', but no DeviceTree file could be found\n", $config{EFI}{DeviceTree};
+      exit 1;
+    }
+  }
+
+  $uki_offset = addBundleSection( \@cmd, ".initrd", $initramfs, $uki_offset, $uki_alignment );
+
+  # Add the kernel last, so that it can decompress without overflowing other sections
+  $uki_offset = addBundleSection( \@cmd, ".linux", $kernel, $uki_offset, $uki_alignment );
+
+  push( @cmd, ( $uefi_stub, $output_file ) );
+
+  my $command = join( ' ', @cmd );
+  Log("Executing: $command");
+
+  @output = execute(@cmd);
+  $status = pop(@output);
+  if ( $status eq 0 ) {
+    foreach my $line (@output) {
+      Log($line);
+    }
+    return $output_file;
+  } else {
+    foreach my $line (@output) {
+      print $line;
+    }
+    print "Failed to create $output_file\n";
+    exit $status;
+  }
+}
+
+# Creates an initramfs and returns its path, or dies with an error
 sub createInitramfs {
-  my ( $imagedir, $kver, $kernfile ) = @_;
+  my ( $imagedir, $kver ) = @_;
 
   my $output_file = join( '/', $imagedir, "zfsbootmenu.img" );
 
-  my @cmd = ( qw(dracut -f --confdir), $runConf{confd} );
-  push(@cmd, qw(-q)) unless $runConf{debug};
+  my @cmd;
+  my $flagsKey;
 
-  if ( defined $config{Global}{DracutFlags} ) {
-    if ( ref $config{Global}{DracutFlags} eq REFARRAY ) {
-      foreach my $flag ( @{ $config{Global}{DracutFlags} } ) {
+  if ( $runConf{usecpio} ) {
+    push( @cmd, ( qw(mkinitcpio --config), $runConf{confd} ) );
+    push( @cmd, qw(-v) ) if $runConf{debug};
+
+    # Add hook directories as appropriate
+    if ( defined $runConf{cpio_hookd} ) {
+      foreach my $hookd ( @{ $runConf{cpio_hookd} } ) {
+        push( @cmd, ( "--hookdir", $hookd ) );
+      }
+    }
+
+    $flagsKey = "InitCPIOFlags";
+  } else {
+    push( @cmd, ( qw(dracut -f --confdir), $runConf{confd} ) );
+    push( @cmd, qw(-q) ) unless $runConf{debug};
+
+    $flagsKey = "DracutFlags";
+  }
+
+  # Load custom flag additions from configuration file
+  if ( defined $config{Global}{$flagsKey} ) {
+    if ( ref $config{Global}{$flagsKey} eq REFARRAY ) {
+      foreach my $flag ( @{ $config{Global}{$flagsKey} } ) {
         push( @cmd, $flag );
       }
     } else {
-      push( @cmd, $config{Global}{DracutFlags} );
+      push( @cmd, $config{Global}{$flagsKey} );
     }
   }
 
-  # If $kernfile is provided, make a unified EFI image with the named kernel
-  if ( defined $kernfile ) {
-    if ( nonempty $config{EFI}{Stub} ) {
-      push( @cmd, ( qq(--uefi-stub), $config{EFI}{Stub} ) );
-    }
-
-    push( @cmd, ( qw(--uefi --kernel-image), $kernfile ) );
-
-    if ( nonempty $runConf{cmdline} ) {
-      push( @cmd, qq(--kernel-cmdline=\"$runConf{cmdline}\") );
-    }
-
-    $output_file = join( '/', $imagedir, "zfsbootmenu.efi" );
+  # Specify kernel version and ouptut location
+  if ( $runConf{usecpio} ) {
+    push( @cmd, ( qw(-A zfsbootmenu), "--generate", $output_file, "--kernel", $kver ) );
+  } else {
+    push( @cmd, ( $output_file, $kver ) );
   }
-
-  push( @cmd, ( $output_file, $kver ) );
 
   my $command = join( ' ', @cmd );
   Log("Executing: $command");
@@ -754,7 +926,7 @@ sub safeCopy {
   return 1;
 }
 
-sub nonempty {
+sub has_value {
   my $item = shift;
   return ( defined $item and length $item );
 }
@@ -883,62 +1055,6 @@ sub verboseUnlink {
   }
 }
 
-sub convertConfig {
-  my ( $inifile, $configfile ) = @_;
-
-  unless ( -r $inifile ) {
-    printf "Unable to read legacy configuration file %s\n", $inifile;
-    exit 1;
-  }
-
-  print "Migrating $inifile to $configfile\n";
-
-  my %ini_config;
-  tie %ini_config, 'Config::IniFiles', ( -file => $inifile );
-
-  my $yaml = YAML::PP->new(
-    boolean => 'boolean',
-    header  => 0,
-  );
-
-  # Force boolean
-  $ini_config{Global}{ManageImages} = boolean( $ini_config{Global}{ManageImages} );
-
-  # Convert the component and EFI image sections to the new format
-  convertImageConfig $ini_config{Components};
-  convertImageConfig $ini_config{EFI};
-
-  # Move syslinux to be a sub section of Components
-  $ini_config{Components}{syslinux} = dclone( $ini_config{syslinux} );
-  $ini_config{Components}{syslinux}{Enabled} = boolean( $ini_config{Components}{syslinux}{CreateConfig} );
-  delete $ini_config{Components}{syslinux}{CreateConfig};
-  delete $ini_config{syslinux};
-
-  $yaml->dump_file( $configfile, \%ini_config );
-
-  printf "Please verify the converted file %s\n", $configfile;
-}
-
-sub convertImageConfig {
-  my $section = shift;
-
-  $section->{Enabled} = boolean( $section->{Copies} > 0 );
-  $section->{Enabled} = boolean( $section->{Copies} > 0 );
-
-  if ( $section->{Versioned} ) {
-    if ( $section->{Copies} > 1 ) {
-      $section->{Versions} = int $section->{Copies};
-    } else {
-      $section->{Versions} = true;
-    }
-  } else {
-    $section->{Versions} = false;
-  }
-
-  delete $section->{Versioned};
-  delete $section->{Copies};
-}
-
 sub Log {
   my $entry = shift;
 
@@ -947,7 +1063,7 @@ sub Log {
   unless ( ref($entry) ) {
     print STDERR "## $entry\n";
   } elsif ( ref $entry eq REFARRAY ) {
-    foreach my $line ( @{ $entry } ) {
+    foreach my $line ( @{$entry} ) {
       chomp $line;
       print STDERR "## $line\n";
     }
@@ -957,6 +1073,9 @@ sub Log {
 }
 
 __END__
+
+=for comment
+KEEP IN SYNC WITH docs/man/generate-zbm.8.rst
 
 =head1 NAME
 
@@ -974,7 +1093,7 @@ Where noted, command-line options supersede options in the B<generate-zbm>(5) co
 
 =item B<--version|-v> I<zbm-version>
 
-Override the ZFSBootMenu version; supersedes I<Global.Version>
+Override the ZFSBootMenu version in output files; supersedes I<Global.Version>
 
 =item B<--kernel|-k> I<kernel-path>
 
@@ -988,9 +1107,31 @@ Manually specify a specific kernel version; supersedes I<Kernel.Version>
 
 Manually specify the output image prefix; supersedes I<Kernel.Prefix>
 
-=item B<--confd|-C> I<confd-path>
+=item B<--initcpio|-i>
 
-Specify the dracut configuration directory; supersedes I<Global.DracutConfDir>
+Force the use of mkinitcpio instead of dracut.
+
+=item B<--no-initcpio|-i>
+
+Force the use of dracut instead of mkinitcpio.
+
+=item B<--confd|-C> I<config-path>
+
+Specify initramfs configuration path
+
+=over 4
+
+=item For dracut: supersedes I<Global.DracutConfDir>
+
+=item For mkinitcpio: supersedes I<Global.InitCPIOConfig>
+
+=back
+
+=item B<--hookd|-H> I<hookd-path>
+
+Specify mkinitcpio hook directory; supersedes I<Global.InitCPIOHookDirs>
+
+May be specified more than once. Ignored when using dracut.
 
 =item B<--cmdline|-l> I<options>
 
@@ -1004,10 +1145,6 @@ Specify the path to search for kernel files; default: I</boot>
 
 Specify the path to a configuration file; default: I</etc/zfsbootmenu/config.yaml>
 
-=item B<--migrate|-m> [I<ini-config>]
-
-Migrate a legacy INI file to the new YAML format, writing the converted file to the path specified by B<--config>. If I<ini-config> is not specified, a default path is chosen by removing any I<.yaml> suffix in the B<--config> path and appending a I<.ini> suffix.
-
 =item B<--enable>
 
 Set the I<Global.ManageImages> option to true, enabling image generation.
@@ -1019,6 +1156,10 @@ Set the I<Global.ManageImages> option to false, disabling image generation.
 =item B<--debug|d>
 
 Enable debug output
+
+=item B<--showver|V>
+
+Print ZFSBootMenu version and quit.
 
 =back
 

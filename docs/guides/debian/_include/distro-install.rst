@@ -1,0 +1,97 @@
+Install Debian
+--------------
+
+.. code-block:: bash
+
+  debootstrap trixie /mnt
+
+Copy files into the new install
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. tabs::
+
+  .. group-tab:: Unencrypted
+
+    .. code-block:: bash
+
+      cp /etc/hostid /mnt/etc
+      cp /etc/resolv.conf /mnt/etc
+
+  .. group-tab:: Encrypted
+
+    .. code-block:: bash
+
+      cp /etc/hostid /mnt/etc/hostid
+      cp /etc/resolv.conf /mnt/etc/
+      mkdir /mnt/etc/zfs
+      cp /etc/zfs/zroot.key /mnt/etc/zfs
+
+Chroot into the new OS
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+  mount -t proc proc /mnt/proc
+  mount -t sysfs sys /mnt/sys
+  mount -B /dev /mnt/dev
+  mount -t devpts pts /mnt/dev/pts
+  chroot /mnt /bin/bash
+
+Basic Debian Configuration
+--------------------------
+
+Set a hostname
+~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+  echo 'YOURHOSTNAME' > /etc/hostname
+  echo -e '127.0.1.1\tYOURHOSTNAME' >> /etc/hosts
+
+Set a root password
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+  passwd
+
+Configure ``apt`` sources
+
+.. code-block:: bash
+
+  cat <<EOF > /etc/apt/sources.list
+  deb http://deb.debian.org/debian/ trixie main non-free-firmware contrib
+  deb-src http://deb.debian.org/debian/ trixie main non-free-firmware contrib
+
+  deb http://deb.debian.org/debian-security trixie-security main non-free-firmware contrib
+  deb-src http://deb.debian.org/debian-security/ trixie-security main non-free-firmware contrib
+
+  # trixie-updates, to get updates before a point release is made;
+  deb http://deb.debian.org/debian trixie-updates main non-free-firmware contrib
+  deb-src http://deb.debian.org/debian trixie-updates main non-free-firmware contrib
+  EOF
+
+Update the repository cache
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+  apt update
+
+Install additional base packages
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+  apt install locales keyboard-configuration console-setup
+
+Configure packages to customize local and console properties
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+  dpkg-reconfigure locales tzdata keyboard-configuration console-setup
+
+.. note::
+
+  You should always enable the `en_US.UTF-8` locale because some programs require it.

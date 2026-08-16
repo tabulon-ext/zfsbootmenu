@@ -7,11 +7,11 @@ if [ -z "${CHROOT_MNT}" ] || [ ! -d "${CHROOT_MNT}" ]; then
 fi
 
 if [[ "$0" =~ "ubuntu" ]]; then
-  SUITE="focal"
+  SUITE="${RELEASE:-jammy}"
   MIRROR="http://us.archive.ubuntu.com/ubuntu/"
   CONFIGURATOR="configure-ubuntu.sh"
 else
-  SUITE="bullseye"
+  SUITE="${RELEASE:-bookworm}"
   MIRROR="http://ftp.us.debian.org/debian/"
   CONFIGURATOR="configure-debian.sh"
 fi
@@ -23,8 +23,9 @@ fi
 
 ./helpers/debootstrap.sh "${DBARGS[@]}" "${SUITE}" "${CHROOT_MNT}" "${MIRROR}"
 
-cp /etc/hostid "${CHROOT_MNT}/etc/"
-cp /etc/resolv.conf "${CHROOT_MNT}/etc/"
+mkdir -p "${CHROOT_MNT}/etc"
+cp /etc/hostid "${CHROOT_MNT}/etc/hostid"
+cp /etc/resolv.conf "${CHROOT_MNT}/etc/resolv.conf"
 
 if [ -d "${CHROOT_MNT}/hostcache" ]; then
   _aptdir="${CHROOT_MNT}/etc/apt/apt.conf.d"

@@ -1,8 +1,11 @@
 #!/bin/bash
 
+: "${RELEASE:=bookworm}"
+: "${APT_REPOS:=main contrib}"
+
 cat << EOF > /etc/apt/sources.list
-deb http://deb.debian.org/debian bullseye main contrib
-deb-src http://deb.debian.org/debian bullseye main contrib
+deb http://deb.debian.org/debian ${RELEASE} ${APT_REPOS}
+deb-src http://deb.debian.org/debian ${RELEASE} ${APT_REPOS}
 EOF
 
 apt-get update
@@ -12,7 +15,8 @@ export TERM=linux
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NONINTERACTIVE_SEEN=true
 
-apt-get install --yes locales console-setup ca-certificates openssh-{client,server}
+apt-get install --yes bsdextrautils \
+	locales console-setup ca-certificates openssh-{client,server}
 dpkg-reconfigure -f noninteractive
 
 # Make sure the kernel is installed and configured before ZFS

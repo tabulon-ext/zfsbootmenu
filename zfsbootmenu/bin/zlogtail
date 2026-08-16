@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# shellcheck disable=SC1091
+sources=(
+  /lib/kmsg-log-lib.sh
+  /lib/zfsbootmenu-ui.sh
+)
+
+for src in "${sources[@]}"; do
+  # shellcheck disable=SC1090
+  if ! source "${src}" >/dev/null 2>&1 ; then
+    echo "<3>ZFSBootMenu: unable to source '${src}' in $0" > /dev/kmsg
+    exit 1
+  fi
+done
+
+unset src sources
+
+[ -f "${BASE}/have_errors" ] && rm "${BASE}/have_errors"
+[ -f "${BASE}/have_warnings" ] && rm "${BASE}/have_warnings"
+
+[ -z "${FUZZYSEL}" ] && FUZZYSEL=fzf
+
+fuzzy_default_options+=(
+  "--no-sort" "--ansi" "--tac" "--no-mouse"
+  "--info=hidden"
+)
+
+if [ -n "${HAS_DISABLED}" ]; then
+  fuzzy_default_options+=(
+    "--disabled"
+  )
+fi
+
+if [ -n "${HAS_BORDER}" ]; then
+  fuzzy_default_options+=(
+    "--border-label-pos=top" "--border=top"
+    "--border-label=\"$( global_header )\""
+    "--color=border:white"
+  )
+fi
+
+export FZF_DEFAULT_OPTS="${fuzzy_default_options[*]}"
+
+print_kmsg_logs "err,warn" | ${FUZZYSEL}

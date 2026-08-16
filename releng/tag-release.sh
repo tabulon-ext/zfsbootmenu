@@ -19,18 +19,27 @@ if [ -n "$(echo "${release}" | sed 's/[0-9][A-Za-z0-9_.-]*$//')" ]; then
 fi
 
 # Make sure paths make sense
-if [ ! -e bin/generate-zbm ] || [ ! -e CHANGELOG.md ]; then
+if [ ! -e bin/generate-zbm ] || [ ! -e docs/CHANGELOG.md ]; then
   error "ERROR: run this script from the root of the zfsbootmenu tree"
 fi
 
-# Only tag releases from master
-if [ "$(git rev-parse --abbrev-ref HEAD)" != "master" ]; then
-  error "ERROR: will not tag releases on any branch but master"
-fi
+# Only tag releases from master or a compatible release-tracking branch
+release_branch="$(git rev-parse --abbrev-ref HEAD)" || release_branch=""
+case "${release_branch}" in
+  master)
+    echo "Tagging release from master branch"
+    ;;
+  "v${release%.*}.x"|"v${release%%.*}.x")
+    echo "Tagging release from version-tracking branch"
+    ;;
+  *)
+    error "ERROR: attempt to tag release on incompatible branch"
+    ;;
+esac
 
 # Only allow changes to CHANGELOG.md when tagging releases
 # shellcheck disable=SC2143
-if [ -n "$(git status --porcelain=v1 | grep -v '.. CHANGELOG.md$')" ]; then
+if [ -n "$(git status --porcelain=v1 | grep -v '.. docs/CHANGELOG.md$')" ]; then
   error "ERROR: will not tag release with non-changelog changes in tree"
 fi
 
@@ -46,6 +55,16 @@ if ! command -v gh >/dev/null 2>&1; then
   error "ERROR: github-cli is required to tag releases"
 fi
 
+# If jq is available, ensure gh is authenticated
+if command -v jq >/dev/null 2>&1; then
+  jqargs=( '.hosts["github.com"][] | select(.state == "success" and .active == true)' )
+  if ! gh auth status --json hosts | jq -e "${jqargs[@]}" >/dev/null 2>&1; then
+    error "ERROR: gh does not appear authenticated; run gh auth and try again"
+  fi
+else
+  echo "NOTICE: install jq to verify gh authentication before tagging"
+fi
+
 # Make sure the tag has a leading "v"
 tag="v${release}"
 
@@ -55,17 +74,28 @@ fi
 
 echo "Will tag release version ${release} as ${tag}"
 
+# update version in documentation
+sed -i "s/^release = '.*'\$/release = '${release}'/" docs/conf.py
+
 # Synchronize man pages with POD documentation
-if [ ! -x releng/pod2man.sh ]; then
+if [ ! -x releng/rst2help.sh ]; then
   error "ERROR: unable to convert documentation"
 fi
 
-if ! out="$( releng/pod2man.sh "${release}" )" ; then
+if ! out="$( releng/rst2help.sh )" ; then
   error "ERROR: ${out}"
 fi
 
-if ! out="$( releng/pod2help.sh )" ; then
+if ! out="$( releng/update-includes.sh )" ; then
   error "ERROR: ${out}"
+fi
+
+if ! out="$( cd docs && make gen-man SPHINXOPTS='-t manpages' )" ; then
+  error "ERROR: ${out}"
+fi
+
+if [ -d docs/man/dist/_static ] && ! out="$( rm -r docs/man/dist/_static )"; then
+  error "ERROR: failed to remove docs/man/dist/_static"
 fi
 
 # Generate a short history for CHANGELOG.md
@@ -76,37 +106,50 @@ relnotes=$(mktemp)
 # shellcheck disable=SC2064
 trap "rm -f ${relnotes}" 0
 
-awk < CHANGELOG.md > "${relnotes}" '
+awk < docs/CHANGELOG.md > "${relnotes}" '
   BEGIN{ hdr=0; }
 
-  /^# /{
+  /^## /{
     if (hdr) exit 0;
     hdr=1;
-    sub(/^# /, "", $0);
+    sub(/^## /, "", $0);
     sub(/ \(.*\)$/, "", $0);
   }
 
   {
-    if (hdr < 1) exit 1;
+    if (hdr < 1) next;
     print;
   }'
 
 # Make sure release notes refer to this version
 if ! (head -n 1 "${relnotes}" | grep -q "ZFSBootMenu ${tag}\b"); then
-  error "ERROR: Add '# ZFSBootMenu ${tag}' header to CHANGELOG.md"
+  error "ERROR: Add '## ZFSBootMenu ${tag}' header to docs/CHANGELOG.md"
 fi
 
 # Update version in generate-zbm
-sed -i bin/generate-zbm -e "s/our \$VERSION.*/our \$VERSION = '${release}';/"
+if [ ! -x releng/version.sh ]; then
+  error "ERROR: unable to update release version"
+fi
+
+if ! out="$( releng/version.sh -v "${release}" -u )"; then
+  error "ERROR: ${out}"
+fi
 
 # Push updates for the release
-git add bin/generate-zbm CHANGELOG.md man/ 90zfsbootmenu/help-files/
+git add bin/generate-zbm docs/ zfsbootmenu/zbm-release zfsbootmenu/help-files/
 git commit -m "Bump to version ${release}"
 
 # Publish release, as prerelease if version contains alphabetics
 if echo "${release}" | grep -q "[A-Za-z]"; then
-  prerelease="--prerelease"
+  prerelease=( "--prerelease" )
+else
+  prerelease=( )
 fi
+
+mkdir -p "releng/assets/${release}"
+
+asset_dir="$( realpath -e "releng/assets/${release}" )"
+asset_files=()
 
 # Create binary assets
 if ! releng/make-binary.sh "${release}"; then
@@ -118,22 +161,21 @@ if ! releng/sign-assets.sh "${release}"; then
   error "ERROR: unable to sign release assets, exiting!"
 fi
 
-asset_dir="$( realpath -e "releng/assets/${release}" )"
-asset_files=()
-
 for style in release recovery; do
-  assets+=( "zfsbootmenu-${style}-vmlinuz-${arch}-v${release}.EFI" )
-  assets+=( "zfsbootmenu-${style}-${arch}-v${release}.tar.gz" )
-done
+  asset_base="zfsbootmenu-${style}-${arch}-v${release}"
+  for f in "${asset_dir}/${asset_base}"*.EFI; do
+    [ -f "${f}" ] || error "ERROR: missing EFI ${style} asset"
+    asset_files+=( "${f}" )
+  done
 
-for asset in "${assets[@]}" ; do
-  f="${asset_dir}/${asset}"
-  [ -f "${f}" ] || error "ERROR: missing boot image ${f}"
-  asset_files+=( "${f}" )
+  for f in "${asset_dir}/${asset_base}"*.tar.gz; do
+    [ -f "${f}" ] || error "ERROR: missing component ${style} asset"
+    asset_files+=( "${f}" )
+  done
 done
 
 for f in sha256.{txt,sig}; do
-  [ -f "${asset_dir}/${f}" ] || error "ERROR: missng sum file ${asset_dir}/${f}"
+  [ -f "${asset_dir}/${f}" ] || error "ERROR: missing sum file ${asset_dir}/${f}"
   asset_files+=( "${asset_dir}/${f}" )
 done
 
@@ -142,13 +184,13 @@ sed -i '1,/^$/d' "${relnotes}"
 
 echo "Release ${release} ready to push and tag"
 while true; do
-  echo "Continue? [Yes]/No"
+  echo "Continue? Yes/[No]"
   read -r response
-  case "${response}" in
-    [Yy][Ee][Ss]|[Yy]|"")
+  case "${response,,}" in
+    yes|y)
       break
       ;;
-    [Nn][Oo]|[Nn])
+    no|n|"")
       error "Release aborted by user request; clean up your local branch!"
       ;;
     *)
@@ -161,9 +203,43 @@ if ! git push; then
   error "ERROR: failed to push to default branch; release aborted"
 fi
 
-if ! gh release create "${tag}" ${prerelease} \
-    -F "${relnotes}" -t "ZFSBootMenu ${tag}" "${asset_files[@]}"; then
-  error "ERROR: release creation failed"
-fi
+gh_release_args=(
+  release create "${tag}" "${prerelease[@]}"
+  --target "${release_branch}" -F "${relnotes}"
+  -t "ZFSBootMenu ${tag}" "${asset_files[@]}"
+)
+
+while ! gh "${gh_release_args[@]}"; do
+  printf "ERROR: FAILED TO CREATE RELEASE ON GITHUB\n  COMMAND: gh"
+  printf " %q" "${gh_release_args[@]}"
+  printf "\n"
+
+  cat <<-ERRPROMPT
+	Decide how to respond:
+	- Type 'CONTINUE' to proceed as if the release were created
+	- Type 'ABORT' to terminate immediately
+	- Press ENTER or type any other text to retry
+	ERRPROMPT
+
+  printf "> "
+
+  read -r err_response _
+  case "${err_response,,}" in
+    abort) error "ERROR: terminated by user request" ;;
+    continue) break ;;
+    *) ;;
+  esac
+done
 
 echo "Pushed and tagged release ${release}"
+
+# Bump the verson to a development tag
+dver="${release}+dev"
+if ! (
+  releng/version.sh -v "${dver}" -u || exit 1
+  git add bin/generate-zbm zfsbootmenu/zbm-release || exit 1
+  git commit -m "Bump to version ${dver}" || exit 1
+  git push
+); then
+  error "ERROR: failed to update to development version"
+fi

@@ -1,31 +1,83 @@
 name: Build check
-on: [ push ]
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'bin/**'
+      - 'zfsbootmenu/**'
+      - 'dracut/**'
+      - 'initcpio/**'
+  pull_request:
+    paths:
+      - 'bin/**'
+      - 'zfsbootmenu/**'
+      - 'dracut/**'
+      - 'initcpio/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     name: Build boot images
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/zbm-dev/zbm-builder
+      image: ghcr.io/zbm-dev/zbm-builder:development
     steps:
       - uses: actions/checkout@master
 
-      - name: Build artifacts
+      - name: Prepare repository for build
         run: |
+          mkdir -p /build
+          rm -rf /zbm
           ln -s "$(pwd)" /zbm
-          cp /zbm/etc/zfsbootmenu/release.conf.d/release.conf /zbm/etc/zfsbootmenu/dracut.conf.d/
-          /zbm/releng/docker/zbm-build.sh -e '.Global.DracutFlags += ["--no-early-microcode"]' -- --debug
+          echo "zfsbootmenu_module_root='/zbm/zfsbootmenu'" > /zbm/etc/zfsbootmenu/dracut.conf.d/zbm_modroot.conf
+          yq-go e '.Global.DracutFlags += ["--no-early-microcode"]' /zbm/etc/zbm-builder/config.yaml > /build/config.yaml
 
-      - name: Archive EFI
-        uses: actions/upload-artifact@v2
-        with:
-          name: EFI
-          path: /zbm/releng/docker/build/*.EFI
+      - name: Build release artifacts
+        run: |
+          rm -rf /build/dracut.conf.d
+          mkdir -p /build/dracut.conf.d
+          cp /zbm/etc/zfsbootmenu/release.conf.d/*.conf /build/dracut.conf.d/
+          /zbm/releng/docker/build-init.sh -- --debug
 
-      - name: Archive components
-        uses: actions/upload-artifact@v2
+      - name: Archive release EFI
+        uses: actions/upload-artifact@v4
         with:
-          name: Components
+          name: Release-EFI
+          path: /build/build/*.EFI
+
+      - name: Archive release components
+        uses: actions/upload-artifact@v4
+        with:
+          name: Release-Components
           path: |
-            /zbm/releng/docker/build/*
-            !/zbm/releng/docker/build/*.EFI
+            /build/build/*
+            !/build/build/*.EFI
+
+      - name: Prune release artifacts
+        run: |
+          rm -r /build/build
+
+      - name: Build recovery artifacts
+        run: |
+          rm -rf /build/dracut.conf.d
+          mkdir -p /build/dracut.conf.d
+          cp /zbm/etc/zfsbootmenu/recovery.conf.d/*.conf /build/dracut.conf.d/
+          /zbm/releng/docker/build-init.sh -- --debug
+
+      - name: Archive recovery EFI
+        uses: actions/upload-artifact@v4
+        with:
+          name: Recovery-EFI
+          path: /build/build/*.EFI
+
+      - name: Archive recovery components
+        uses: actions/upload-artifact@v4
+        with:
+          name: Recovery-Components
+          path: |
+            /build/build/*
+            !/build/build/*.EFI

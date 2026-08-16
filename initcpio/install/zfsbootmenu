@@ -1,0 +1,215 @@
+#!/bin/bash
+
+add_terminfo() {
+    # Populate some basic terminfo databases
+    # Shamelessly ripped from dracut
+
+    local tt troot
+
+    # Find the first path that contains a linux terminfo
+    for tt in /etc /usr/share /lib; do
+        if [[ -r "${tt}/terminfo/l/linux" ]]; then
+            troot="${tt}/terminfo"
+            break
+        fi
+    done
+
+    [[ -d "${troot}" ]] || return
+
+    # At this point, at least l/linux is guaranteed to exist
+    for tt in "l/linux" "v/vt100" "v/vt102" "v/vt220"; do
+        [[ -r "${troot}/${tt}" ]] || continue
+        add_file "${troot}/${tt}" "/usr/share/terminfo/${tt}"
+    done
+}
+
+add_optional_binary() {
+    # This has to be inverted to avoid a RETURN trap that triggers failure
+    if ! command -v "${1}" >/dev/null 2>&1; then
+        warning "optional component '${1}' not found, will omit"
+        return 0
+    fi
+
+    add_binary "${1}"
+}
+
+add_optional_module() {
+    # Add a kernel module to the initcpio image only if the module
+    # actually exists as a loadable file. Otherwise, ignore the module.
+
+    # Without a version, no module is added
+    [[ $KERNELVERSION == none ]] && return 0
+
+    # Strip any extension, normalize name
+    local target="${1%.ko*}"
+    target="${target//-/_}"
+
+    # Try to determine path to module, if there is one
+    local kfile
+    kfile="$( modinfo -k "${KERNELVERSION}" -n "${target}" 2>/dev/null )" || return 0
+
+    # If module has a valid path, try to add it properly
+    case "${kfile}" in
+        /*) add_module "${target}" ;;
+        *) return 0 ;;
+    esac
+}
+
+add_zbm_binaries() {
+    local mustcopy maycopy
+
+    # Hard requirements
+    # shellcheck disable=SC2154
+    case "${zfsbootmenu_miser}" in
+        1|[Yy]|[Yy][Ee][Ss]|[Oo][Nn])
+            # Try to figure out what busybox provides
+            ;;
+        *)
+            # Don't be a miser, use system versions
+            map add_binary "${zfsbootmenu_essential_binaries[@]}"
+            map add_optional_binary "${zfsbootmenu_optional_binaries[@]}"
+            return
+            ;;
+    esac
+
+    # Figure out which binaries busybox does *not* provide
+    # shellcheck disable=SC2154
+    readarray -t mustcopy < <(comm -23 \
+        <(printf "%s\n" "${zfsbootmenu_essential_binaries[@]}" | sort) \
+        <(/usr/lib/initcpio/busybox --list | sort))
+
+    # Copy the missing required binaries
+    map add_binary "${mustcopy[@]}"
+
+    # Do the say for optional binaries
+    # shellcheck disable=SC2154
+    readarray -t maycopy < <(comm -23 \
+        <(printf "%s\n" "${zfsbootmenu_optional_binaries[@]}" | sort) \
+        <(/usr/lib/initcpio/busybox --list | sort))
+
+    map add_optional_binary "${maycopy[@]}"
+}
+
+create_zbm_entrypoint() {
+    # Create an entrypoint to initialize the ZBM environment
+
+    mkdir -p "${BUILDROOT}/libexec"
+    cat > "${BUILDROOT}/libexec/zfsbootmenu-initcpio" <<-'EOF'
+	#!/bin/bash
+	hooks=(
+	    /lib/zfsbootmenu-parse-commandline.sh
+	    /lib/zfsbootmenu-preinit.sh
+	)
+
+	for hook in "${hooks[@]}"; do
+	    [ -r "${hook}" ] && source "${hook}" && continue
+
+	    echo "ERROR: failed to load hook "${hook}"; good luck..."
+	    exec /bin/bash
+	done
+	EOF
+
+    chmod 755 "${BUILDROOT}/libexec/zfsbootmenu-initcpio"
+}
+
+
+build() {
+    local _file
+
+    : "${zfsbootmenu_module_root:=/usr/share/zfsbootmenu}"
+    : "${zfsbootmenu_hook_root:=/etc/zfsbootmenu/hooks}"
+
+    # shellcheck disable=SC1091
+    source "${zfsbootmenu_module_root}/install-helpers.sh" || exit 1
+
+    # shellcheck disable=SC2034
+    ZBM_BUILDSTYLE="mkinitcpio"
+
+    # Modules (required and optional) used by ZBM
+    # shellcheck disable=SC2154
+    map add_module "${zfsbootmenu_essential_modules[@]}"
+
+    # shellcheck disable=SC2154
+    map add_optional_module "${zfsbootmenu_optional_modules[@]}"
+
+    # Necessary udev rules (also finds required binaries)
+    # shellcheck disable=SC2154
+    map add_udev_rule "${zfsbootmenu_udev_rules[@]}"
+
+    # Binaries required for ZBM operation
+    add_zbm_binaries
+
+    # Add libgcc_s as appropriate
+    local _libgcc_s
+    if ! _libgcc_s="$( find_libgcc_s )"; then
+        error "unable to locate libgcc_s.so"
+        exit 1
+    fi
+
+    local _lib
+    while read -r _lib ; do
+        [ -n "${_lib}" ] || continue
+        if ! add_binary "${_lib}"; then
+            error "Failed to install '${_lib}'"
+            exit 1
+        fi
+    done <<< "${_libgcc_s}"
+
+    # Install core ZBM functionality
+    if ! install_zbm_core; then
+        error "Failed to install ZFSBootMenu core"
+        exit 1
+    fi
+
+    # Install runtime hooks
+    if ! install_zbm_hooks; then
+        error "Failed to install runtime hooks"
+        exit 1
+    fi
+
+    # Install online documentation if possible
+    install_zbm_docs
+
+    # Install an os-release, if one is available
+    install_zbm_osver
+
+    # Install pre-init scripts
+    for _file in "${zfsbootmenu_module_root}"/pre-init/*; do
+        add_file "${_file}" "/lib/${_file##*/}" && continue;
+
+        error "Failed to install ZFSBootMenu component ${_file}"
+        exit 1
+    done
+
+    # allow mount(8) to "autodetect" ZFS
+    echo 'zfs' >>"${BUILDROOT}/etc/filesystems"
+
+    compat_dirs=( "/etc/zfs/compatibility.d" "/usr/share/zfs/compatibility.d/" )
+    for compat_dir in "${compat_dirs[@]}"; do
+        [ -d "${compat_dir}" ] && add_full_dir "${compat_dir}"
+    done
+
+    # Copy host-specific ZFS configs
+    [[ -f /etc/hostid ]] && add_file "/etc/hostid"
+    [[ -f /etc/zfs/vdev_id.conf ]] && add_file "/etc/zfs/vdev_id.conf"
+    [[ -f /etc/modprobe.d/zfs.conf ]] && add_file "/etc/modprobe.d/zfs.conf"
+
+    add_terminfo
+
+    create_zbm_conf
+    create_zbm_profiles
+    create_zbm_traceconf
+    create_zbm_entrypoint
+
+    if command -v setfont >/dev/null 2>&1; then
+      install_zbm_fonts && add_binary setfont
+    fi
+
+    add_runscript
+}
+
+help() {
+    echo "This hook turns the initramfs into a ZFSBootMenu image"
+}
+
+# vim: set ts=4 sw=4 ft=sh et:

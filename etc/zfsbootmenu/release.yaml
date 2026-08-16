@@ -5,10 +5,9 @@ Global:
 Components:
   Versions: false
   Enabled: true
-  syslinux:
-    Enabled: false
 EFI:
   Versions: false
   Enabled: true
+  SplashImage: /etc/zfsbootmenu/splash.bmp
 Kernel:
-  CommandLine: zfsbootmenu loglevel=4 nomodeset
+  CommandLine: quiet loglevel=0 nomodeset

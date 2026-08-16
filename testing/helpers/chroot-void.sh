@@ -34,20 +34,13 @@ for keyfile in /etc/zfs/*.key; do
   echo "install_items+=\" ${keyfile} \"" >> /etc/dracut.conf.d/zol.conf
 done
 
-xbps-install -y linux5.10 linux5.10-headers dracut zfs
+: "${KERNEL:=linux6.12}"
 
-# Set kernel commandline
-case "$(uname -m)" in
-  ppc64*)
-    consoles="console=tty1 console=hvc0"
-    ;;
-  x86_64)
-    consoles="console=tty1 console=ttyS0"
-    ;;
-esac
+xbps-install -y "${KERNEL}" "${KERNEL}-headers" dracut zfs
 
 if [ -n "${ZBM_POOL}" ]; then
-  cmdline="spl_hostid=$( hostid ) rw loglevel=4 ${consoles}"
+  # Set kernel commandline
+  cmdline="spl_hostid=$( hostid ) rw loglevel=4 console=tty1 console=ttyS0"
   zfs set org.zfsbootmenu:commandline="${cmdline}" "${ZBM_POOL}/ROOT"
 fi
 
@@ -76,7 +69,7 @@ sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 # Pre-install zfsbootmenu
 if [ -x /root/zbm-populate.sh ]; then
   xbps-query -Rp run_depends zfsbootmenu | xargs xbps-install -y
-  xbps-install -y git
+  xbps-install -y git systemd-boot-efistub
   SKIP_PERL=yes /root/zbm-populate.sh
   rm /root/zbm-populate.sh
 fi

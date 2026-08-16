@@ -1,0 +1,276 @@
+#!/bin/bash
+# vim: softtabstop=2 shiftwidth=2 expandtab
+
+# Source functional libraries, logging and configuration
+sources=(
+  /lib/profiling-lib.sh
+  /etc/zfsbootmenu.conf
+  /lib/zfsbootmenu-core.sh
+  /lib/zfsbootmenu-ui.sh
+  /lib/kmsg-log-lib.sh
+  /etc/profile
+  /lib/fzf-defaults.sh
+)
+
+for src in "${sources[@]}"; do
+  # shellcheck disable=SC1090
+  if ! source "${src}" >/dev/null 2>&1 ; then
+    echo -e "\033[0;31mWARNING: ${src} was not sourced; unable to proceed\033[0m"
+    exec /bin/bash
+  fi
+done
+
+unset src sources
+
+# Make sure /dev/zfs exists, otherwise drop to a recovery shell
+[ -e /dev/zfs ] || emergency_shell "/dev/zfs missing, check that kernel modules are loaded"
+
+mkdir -p "${BASE:=/zfsbootmenu}"
+
+while [ ! -e "${BASE}/initialized" ]; do
+  if ! timed_prompt -d -1 \
+      -m "$( colorize red "ZFSBootMenu must be initialized to continue" )" \
+      -r "initialize" \
+      -e "abort     "; then
+    zdebug "aborted while waiting for initialization"
+    tput cnorm
+    tput clear
+    exit
+  fi
+
+  tput cnorm
+  tput clear
+  [ -e "${BASE}/initialized" ] || /libexec/zfsbootmenu-init
+done
+
+[ -e "${BASE}/active" ] && takeover
+
+# If the takeover fails for some reason, spin until it ends
+while [ -e "${BASE}/active" ]; do
+  if ! timed_prompt -d 1 -e "to cancel" \
+      -p "Waiting for other ZFSBootMenu instance to terminate"; then
+    zdebug "exited while waiting to own ${BASE}/active"
+    tput cnorm
+    tput clear
+    exit
+  fi
+done
+
+# Prevent conflicting use of the boot menu
+echo "$$" > "${BASE}/active"
+zdebug "creating ${BASE}/active"
+
+# shellcheck disable=SC2064
+trap "rm -f '${BASE}/active'" EXIT
+trap "zdebug 'exiting via USR1 signal' ; tput clear ; exit 0" SIGUSR1
+trap '' SIGINT
+
+if [ -r "${BASE}/bootfs" ]; then
+  read -r BOOTFS < "${BASE}/bootfs"
+  export BOOTFS
+  zdebug "setting BOOTFS to ${BOOTFS}"
+fi
+
+# Run setup hooks, if they exist
+tput clear
+/libexec/zfsbootmenu-run-hooks "setup.d"
+
+# Clear screen before a possible password prompt
+tput clear
+
+BE_SELECTED=0
+
+while true; do
+  tput civis
+
+  if [ "${BE_SELECTED}" -eq 0 ]; then
+    # Populate the BE list, load any keys as necessary
+    # If no BEs were found, remove the empty environment file
+    if ! populate_be_list "${BASE}/bootenvs" ; then
+      rm -f "${BASE}/bootenvs"
+
+      timed_prompt -d 10 \
+        -m "$( colorize red "No boot environments with kernels found" )" \
+        -m "$( colorize red "Dropping to an emergency shell to allow recovery attempts" )"
+      tput clear
+      tput cnorm
+      exit 1
+    fi
+
+    bootenv="$( draw_be "${BASE}/bootenvs" )" || continue
+
+    # shellcheck disable=SC2162
+    IFS=, read key selected_be <<<"${bootenv}"
+    zdebug "selected key: ${key}"
+  fi
+
+  # At this point, either a boot proceeds or a menu will be drawn fresh
+  BE_SELECTED=0
+
+  case "${key}" in
+    "right")
+      key="mod-s"
+      BE_SELECTED=1
+      continue
+      ;;
+    "enter")
+      if ! kexec_kernel "$( select_kernel "${selected_be}" )"; then
+        zdebug "kexec failed for ${selected_be}"
+        continue
+      fi
+      # Should never be reached, but just in case...
+      exit
+      ;;
+    "mod-k")
+      selection="$( draw_kernel "${selected_be}" )" || continue
+
+      # shellcheck disable=SC2162
+      IFS=, read subkey selected_kernel <<< "${selection}"
+      zdebug "selected kernel: ${selected_kernel}"
+
+      # shellcheck disable=SC2034
+      IFS=$'\t' read -r fs kpath initrd <<< "${selected_kernel}"
+
+      case "${subkey}" in
+        "enter")
+          if ! kexec_kernel "${selected_kernel}"; then
+            zdebug "kexec failed for ${selected_kernel}"
+            continue
+          fi
+          exit
+          ;;
+        "mod-d")
+          set_default_kernel "${fs}" "${kpath}"
+          ;;
+        "mod-u")
+          set_default_kernel "${fs}"
+          ;;
+        "mod-e")
+          /libexec/zfsbootmenu-edit-kcl -b "${BOOTFS}" -k "${kpath}" "${fs}"
+          ;;
+        "left")
+          key="mod-s"
+          BE_SELECTED=1
+          continue
+          ;;
+        "right")
+          BE_SELECTED=1
+          key="mod-p"
+          continue
+          ;;
+      esac
+      ;;
+    "mod-p")
+      selection="$( draw_pool_status )" || continue
+
+      # shellcheck disable=SC2162
+      IFS=, read subkey selected_pool <<< "${selection}"
+      zdebug "selected pool: ${selected_pool}"
+
+      case "${subkey}" in
+        "left")
+          key="mod-k"
+          BE_SELECTED=1
+          continue
+          ;;
+        "enter")
+          continue
+          ;;
+        "mod-r")
+          rewind_checkpoint "${selected_pool}"
+          ;;
+      esac
+      ;;
+    "mod-d")
+      set_default_env "${selected_be}"
+      echo "${BOOTFS}" > "${BASE}/bootfs"
+      ;;
+    "mod-s")
+      selection="$( draw_snapshots "${selected_be}" )" || continue
+
+      # shellcheck disable=SC2162
+      IFS=, read subkey selected_snap <<< "${selection}"
+
+      # two snapshots were potentially returned - discard the second
+      selected_snap="${selected_snap%,*}"
+      zdebug "selected snapshot: ${selected_snap}"
+
+      case "${subkey}" in
+        "left")
+          BE_SELECTED=0
+          continue
+          ;;
+        "right")
+          BE_SELECTED=1
+          key="mod-k"
+          continue
+          ;;
+      esac
+
+      if is_snapshot "${selected_snap}" ; then
+        case "${subkey}" in
+          "mod-j")
+            zfs_chroot "${selected_snap}"
+            BE_SELECTED=1
+            continue
+          ;;
+          "mod-o")
+            change_sort
+            BE_SELECTED=1
+            continue
+          ;;
+          *)
+            snapshot_dispatcher "${selected_snap}" "${subkey}"
+            continue
+          ;;
+        esac
+      else
+        case "${subkey}" in
+          "mod-n")
+            snapshot_dispatcher "${selected_be}" "${subkey}"
+            continue
+          ;;
+          *)
+            BE_SELECTED=1
+            continue
+          ;;
+        esac
+      fi
+      ;;
+    "mod-r")
+      tput cnorm
+      tput clear
+      break
+      ;;
+    "mod-w")
+      pool="${selected_be%%/*}"
+
+      # This will make all keys in the pool unavailable, but populate_be_list
+      # should reload the missing keys in the next iteration, so why unlock here?
+      if is_writable "${pool}"; then
+        set_ro_pool "${pool}"
+      else
+        set_rw_pool "${pool}"
+      fi
+
+      # Clear the screen ahead of a potential password prompt from populate_be_list
+      tput clear
+      tput cnorm
+      ;;
+    "mod-e")
+      /libexec/zfsbootmenu-edit-kcl -b "${BOOTFS}" "${selected_be}"
+      ;;
+    "mod-t")
+      [ -f "${BASE}/cmdline" ] && rm "${BASE}/cmdline"
+      ;;
+    "mod-j")
+      zfs_chroot "${selected_be}"
+      ;;
+    "mod-o")
+      change_sort
+      ;;
+    "mod-x")
+      /libexec/zpowermenu
+      ;;
+  esac
+done
